@@ -1,0 +1,38 @@
+---
+- name: Remove the iMessage backup LaunchAgent
+  hosts: local
+  gather_facts: true
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+  tasks:
+    - name: Unload the scheduled backup
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - bootout
+          - "gui/{{ ansible_facts['user_uid'] }}/{{ imessage_schedule_label }}"
+      failed_when: false
+      changed_when: true
+
+    - name: Remove the LaunchAgent
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ imessage_schedule_label }}.plist"
+        state: absent
+
+    - name: Remove the scheduled backup wrapper
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/bin/ansible-imessage-backup"
+        state: absent

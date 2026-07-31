@@ -1,0 +1,67 @@
+---
+# One-time post-authentication activation. This publishes the newest existing
+# verified archive, rebuilds and publishes lifecycle metadata, and installs the
+# recurring LaunchAgent unless explicitly disabled.
+- name: Validate and persist Nextcloud settings
+  ansible.builtin.import_playbook: activate-nextcloud-preflight.yml
+  tags:
+    - activate
+    - preflight
+
+- name: Publish and verify the newest existing archive
+  ansible.builtin.import_playbook: nextcloud-archive.yml
+  tags:
+    - activate
+    - nextcloud_archive
+
+- name: Publish and verify any other pending local archives
+  ansible.builtin.import_playbook: nextcloud-backlog.yml
+  tags:
+    - activate
+    - nextcloud_backlog
+
+- name: Hydrate compact catalog data for verified remote-only archives
+  ansible.builtin.import_playbook: catalog-hydrate.yml
+  tags:
+    - activate
+    - catalog
+    - catalog_hydrate
+
+- name: Retire verified full local staging archives when explicitly enabled
+  ansible.builtin.import_playbook: retire-local-archives.yml
+  tags:
+    - activate
+    - retire
+    - local_retirement
+
+- name: Retire older remote archives only when all useful content exists later
+  ansible.builtin.import_playbook: retire-superseded-remote-archives.yml
+  tags:
+    - activate
+    - retire
+    - remote_superseded_retirement
+
+- name: Rebuild the master index
+  ansible.builtin.import_playbook: catalog.yml
+  tags:
+    - activate
+    - catalog
+
+- name: Rebuild the safe-pruning report
+  ansible.builtin.import_playbook: pruning-report.yml
+  tags:
+    - activate
+    - pruning
+
+- name: Publish and verify lifecycle metadata
+  ansible.builtin.import_playbook: nextcloud-metadata.yml
+  tags:
+    - activate
+    - nextcloud_metadata
+
+- name: Install the recurring archive schedule
+  ansible.builtin.import_playbook: install-schedule.yml
+  when: imessage_activation_install_schedule | bool
+  tags:
+    - activate
+    - schedule

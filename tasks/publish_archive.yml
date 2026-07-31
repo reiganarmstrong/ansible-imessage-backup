@@ -1,0 +1,154 @@
+---
+- name: Inspect the archive selected for remote publication
+  ansible.builtin.stat:
+    path: "{{ imessage_archive_to_publish }}"
+  register: imessage_lifecycle_archive_stat
+
+- name: Require a verified archive directory
+  ansible.builtin.assert:
+    that:
+      - imessage_lifecycle_archive_stat.stat.exists
+      - imessage_lifecycle_archive_stat.stat.isdir
+    fail_msg: "The selected archive does not exist: {{ imessage_archive_to_publish }}"
+
+- name: Read the local export verification
+  ansible.builtin.slurp:
+    src: "{{ imessage_archive_to_publish }}/verification.json"
+  register: imessage_lifecycle_export_verification
+
+- name: Require successful local verification
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          imessage_lifecycle_export_verification.content
+          | b64decode
+          | from_json
+        ).passed
+    fail_msg: "Refusing to publish an archive that did not pass local verification."
+
+- name: Create lifecycle state directories
+  ansible.builtin.file:
+    path: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/"
+        ~ item
+      }}
+    state: directory
+    mode: "0700"
+  loop:
+    - remote-checks
+    - remote-verifications
+
+- name: Build immutable archive remote paths
+  ansible.builtin.set_fact:
+    imessage_lifecycle_archive_name: "{{ imessage_archive_to_publish | basename }}"
+    imessage_nextcloud_archive_destination: >-
+      {{
+        imessage_nextcloud_remote | regex_replace('/+$', '')
+        ~ "/"
+        ~ (imessage_archive_to_publish | basename)
+      }}
+    imessage_nextcloud_archive_check_report: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/remote-checks/"
+        ~ (imessage_archive_to_publish | basename)
+        ~ ".txt"
+      }}
+    imessage_nextcloud_archive_verification_report: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/remote-verifications/"
+        ~ (imessage_archive_to_publish | basename)
+        ~ ".json"
+      }}
+
+- name: Invalidate any previous remote verification marker
+  ansible.builtin.file:
+    path: "{{ imessage_nextcloud_archive_verification_report }}"
+    state: absent
+
+- name: Copy the immutable archive to Nextcloud
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_effective_rclone_binary }}"
+      - copy
+      - "{{ imessage_archive_to_publish }}"
+      - "{{ imessage_nextcloud_archive_destination }}"
+      - --create-empty-src-dirs
+      - --immutable
+      - --transfers
+      - "{{ imessage_nextcloud_transfers | string }}"
+      - --checkers
+      - "{{ imessage_nextcloud_checkers | string }}"
+  changed_when: true
+
+- name: Byte-verify every remote archive file
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_effective_rclone_binary }}"
+      - check
+      - "{{ imessage_archive_to_publish }}"
+      - "{{ imessage_nextcloud_archive_destination }}"
+      - --download
+      - --combined
+      - "{{ imessage_nextcloud_archive_check_report }}"
+      - --checkers
+      - "{{ imessage_nextcloud_checkers | string }}"
+  changed_when: false
+
+- name: Protect the remote check report
+  ansible.builtin.file:
+    path: "{{ imessage_nextcloud_archive_check_report }}"
+    mode: "0600"
+
+- name: Inventory every byte-verified archive file
+  ansible.builtin.find:
+    paths: "{{ imessage_archive_to_publish }}"
+    recurse: true
+    hidden: true
+    file_type: file
+  register: imessage_lifecycle_archive_files
+
+- name: Record successful remote archive verification
+  ansible.builtin.copy:
+    dest: "{{ imessage_nextcloud_archive_verification_report }}"
+    mode: "0600"
+    content: >-
+      {{
+        {
+          "schema_version": 1,
+          "passed": true,
+          "archive_name": imessage_lifecycle_archive_name,
+          "archive_path": imessage_archive_to_publish,
+          "remote_destination": imessage_nextcloud_archive_destination,
+          "verification_mode": "rclone_check_download",
+          "verified_at": now(
+            utc=true,
+            fmt="%Y-%m-%dT%H:%M:%SZ"
+          ),
+          "file_count": imessage_lifecycle_archive_files.matched,
+          "total_bytes": (
+            imessage_lifecycle_archive_files.files
+            | map(attribute="size")
+            | sum
+          ),
+          "rclone_version": (
+            imessage_rclone_version.stdout_lines | first | default("")
+          )
+        } | to_nice_json
+      }}
+
+- name: Report remote archive verification
+  ansible.builtin.debug:
+    msg:
+      - "Remote archive verified: {{ imessage_nextcloud_archive_destination }}"
+      - "Verification report: {{ imessage_nextcloud_archive_verification_report }}"

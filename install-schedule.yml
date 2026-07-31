@@ -1,0 +1,134 @@
+---
+- name: Install a weekly iMessage backup LaunchAgent
+  hosts: local
+  gather_facts: true
+
+  vars_files:
+    - vars/defaults.yml
+
+  handlers:
+    - name: Unload the previous scheduled backup
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - bootout
+          - "gui/{{ ansible_facts['user_uid'] }}/{{ imessage_schedule_label }}"
+      failed_when: false
+      changed_when: true
+      listen: Reload scheduled backup
+
+    - name: Load the scheduled backup
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - bootstrap
+          - "gui/{{ ansible_facts['user_uid'] }}"
+          - "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ imessage_schedule_label }}.plist"
+      changed_when: true
+      listen: Reload scheduled backup
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Require macOS
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["system"] == "Darwin"
+        fail_msg: "LaunchAgent scheduling is available only on macOS."
+
+    - name: Validate schedule settings
+      ansible.builtin.assert:
+        that:
+          - imessage_schedule_weekday | int >= 1
+          - imessage_schedule_weekday | int <= 7
+          - imessage_schedule_hour | int >= 0
+          - imessage_schedule_hour | int <= 23
+          - imessage_schedule_minute | int >= 0
+          - imessage_schedule_minute | int <= 59
+          - imessage_schedule_log_retention_days | int >= 1
+
+    - name: Locate ansible-playbook
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - ansible-playbook
+      register: imessage_ansible_playbook_lookup
+      changed_when: false
+
+  tasks:
+    - name: Create the local executable directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.local/bin"
+        state: directory
+        mode: "0700"
+
+    - name: Create the private log directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/Logs/ansible-imessage-backup"
+        state: directory
+        mode: "0700"
+
+    - name: Create the private scheduler state directory
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup"
+        state: directory
+        mode: "0700"
+
+    - name: Create the private scheduler lock parent
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/Library/Caches/ansible-imessage-backup"
+        state: directory
+        mode: "0700"
+
+    - name: Install the scheduled backup wrapper
+      ansible.builtin.template:
+        src: templates/run-scheduled-backup.zsh.j2
+        dest: "{{ ansible_facts['env']['HOME'] }}/.local/bin/ansible-imessage-backup"
+        mode: "0700"
+      notify: Reload scheduled backup
+
+    - name: Install the backup LaunchAgent
+      ansible.builtin.template:
+        src: templates/launch-agent.plist.j2
+        dest: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ imessage_schedule_label }}.plist"
+        mode: "0600"
+      notify: Reload scheduled backup
+
+    - name: Apply any schedule changes now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check the loaded schedule
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - print
+          - "gui/{{ ansible_facts['user_uid'] }}/{{ imessage_schedule_label }}"
+      register: imessage_schedule_status
+      changed_when: false
+      failed_when: false
+
+    - name: Load a schedule that is not already active
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - bootstrap
+          - "gui/{{ ansible_facts['user_uid'] }}"
+          - "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ imessage_schedule_label }}.plist"
+      when: imessage_schedule_status.rc != 0
+      changed_when: true
+
+    - name: Report the installed schedule
+      ansible.builtin.debug:
+        msg: >-
+          Scheduled {{ imessage_schedule_label }} for weekday
+          {{ imessage_schedule_weekday }} at
+          {{ "%02d" | format(imessage_schedule_hour | int) }}:{{
+          "%02d" | format(imessage_schedule_minute | int) }}.

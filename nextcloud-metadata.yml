@@ -1,0 +1,244 @@
+---
+- name: Publish and byte-verify the iMessage lifecycle metadata
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - imessage_nextcloud_enabled
+        - imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_effective_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_rclone_lookup.stdout | default('') | trim
+          }}
+        imessage_nextcloud_effective_root: >-
+          {{ imessage_nextcloud_remote | regex_replace('/+$', '') }}
+      when: imessage_nextcloud_enabled
+
+    - name: Require rclone and a Nextcloud destination
+      ansible.builtin.assert:
+        that:
+          - imessage_effective_rclone_binary | length > 0
+          - imessage_nextcloud_remote | length > 0
+          - "':' in imessage_nextcloud_remote"
+      when: imessage_nextcloud_enabled
+
+    - name: Select the archive verification marker to publish
+      ansible.builtin.set_fact:
+        imessage_lifecycle_effective_archive_path: >-
+          {{
+            imessage_export_path
+            if imessage_export_path is defined
+            else imessage_lifecycle_archive_path
+          }}
+      when: imessage_nextcloud_enabled
+
+    - name: Require an archive path for lifecycle metadata
+      ansible.builtin.assert:
+        that:
+          - imessage_lifecycle_effective_archive_path | length > 0
+      when: imessage_nextcloud_enabled
+
+    - name: Discover all successful remote verification markers
+      ansible.builtin.find:
+        paths: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/remote-verifications"
+          }}
+        patterns:
+          - "*.json"
+        recurse: false
+        file_type: file
+      register: imessage_lifecycle_remote_verification_markers
+      when: imessage_nextcloud_enabled
+
+    - name: Define lifecycle metadata paths
+      ansible.builtin.set_fact:
+        imessage_lifecycle_metadata_relative_paths: >-
+          {{
+            (
+              [
+                imessage_master_index_name,
+                imessage_archive_catalog_name,
+                imessage_message_index_name
+              ]
+              if imessage_master_index_enabled
+              else []
+            )
+            + (
+              [
+                imessage_pruning_report_name,
+                imessage_pruning_html_report_name
+              ]
+              if imessage_pruning_report_enabled
+              else []
+            )
+            + (
+              [
+                imessage_lifecycle_state_directory_name
+                ~ "/"
+                ~ imessage_remote_superseded_retirement_report_name
+              ]
+              if imessage_remote_superseded_retirement_enabled
+              else []
+            )
+          }}
+        imessage_lifecycle_metadata_files_from: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/published-files.txt"
+          }}
+        imessage_lifecycle_metadata_check_report: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/metadata-check.txt"
+          }}
+      when: imessage_nextcloud_enabled
+
+    - name: Add every remote verification marker to the metadata set
+      ansible.builtin.set_fact:
+        imessage_lifecycle_metadata_relative_paths: >-
+          {{
+            imessage_lifecycle_metadata_relative_paths
+            + [
+              imessage_lifecycle_state_directory_name
+              ~ "/remote-verifications/"
+              ~ (item.path | basename)
+            ]
+          }}
+      loop: "{{ imessage_lifecycle_remote_verification_markers.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: imessage_nextcloud_enabled
+
+    - name: Require the current archive verification marker
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              imessage_lifecycle_state_directory_name
+              ~ "/remote-verifications/"
+              ~ (imessage_lifecycle_effective_archive_path | basename)
+              ~ ".json"
+            ) in imessage_lifecycle_metadata_relative_paths
+        fail_msg: >-
+          The current archive has no successful remote verification marker.
+      when: imessage_nextcloud_enabled
+
+    - name: Require generated lifecycle metadata
+      ansible.builtin.stat:
+        path: "{{ imessage_backup_root }}/{{ item }}"
+      loop: "{{ imessage_lifecycle_metadata_relative_paths }}"
+      register: imessage_lifecycle_metadata_stats
+      when: imessage_nextcloud_enabled
+
+    - name: Validate generated lifecycle metadata
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              imessage_lifecycle_metadata_stats.results
+              | selectattr("stat.exists", "equalto", false)
+              | list
+              | length
+            ) == 0
+          - >-
+            (
+              imessage_lifecycle_metadata_stats.results
+              | selectattr("stat.isreg", "equalto", false)
+              | list
+              | length
+            ) == 0
+        fail_msg: "One or more required lifecycle metadata files are missing."
+      when: imessage_nextcloud_enabled
+
+    - name: Write the exact metadata publication list
+      ansible.builtin.copy:
+        dest: "{{ imessage_lifecycle_metadata_files_from }}"
+        mode: "0600"
+        content: |
+          {% for path in imessage_lifecycle_metadata_relative_paths %}
+          {{ path }}
+          {% endfor %}
+      when: imessage_nextcloud_enabled
+
+    - name: Publish lifecycle metadata to Nextcloud
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_rclone_binary }}"
+          - copy
+          - "{{ imessage_backup_root }}"
+          - "{{ imessage_nextcloud_effective_root }}"
+          - --files-from
+          - "{{ imessage_lifecycle_metadata_files_from }}"
+          - --create-empty-src-dirs
+          - --transfers
+          - "{{ imessage_nextcloud_transfers | string }}"
+          - --checkers
+          - "{{ imessage_nextcloud_checkers | string }}"
+      changed_when: true
+      when: imessage_nextcloud_enabled
+
+    - name: Byte-verify lifecycle metadata in Nextcloud
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_rclone_binary }}"
+          - check
+          - "{{ imessage_backup_root }}"
+          - "{{ imessage_nextcloud_effective_root }}"
+          - --files-from
+          - "{{ imessage_lifecycle_metadata_files_from }}"
+          - --download
+          - --combined
+          - "{{ imessage_lifecycle_metadata_check_report }}"
+          - --checkers
+          - "{{ imessage_nextcloud_checkers | string }}"
+      changed_when: false
+      when: imessage_nextcloud_enabled
+
+    - name: Protect the metadata check report
+      ansible.builtin.file:
+        path: "{{ imessage_lifecycle_metadata_check_report }}"
+        mode: "0600"
+      when: imessage_nextcloud_enabled
+
+    - name: Report remote lifecycle metadata verification
+      ansible.builtin.debug:
+        msg: >-
+          The enabled lifecycle metadata and current archive verification
+          marker are byte-identical in Nextcloud.
+      when: imessage_nextcloud_enabled

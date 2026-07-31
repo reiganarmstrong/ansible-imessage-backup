@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ imessage_schedule_label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{ ansible_facts["env"]["HOME"] }}/.local/bin/ansible-imessage-backup</string>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>{{ imessage_schedule_weekday }}</integer>
+    <key>Hour</key>
+    <integer>{{ imessage_schedule_hour }}</integer>
+    <key>Minute</key>
+    <integer>{{ imessage_schedule_minute }}</integer>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>WorkingDirectory</key>
+  <string>{{ playbook_dir }}</string>
+  <key>StandardOutPath</key>
+  <string>{{ ansible_facts["env"]["HOME"] }}/Library/Logs/ansible-imessage-backup/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{ ansible_facts["env"]["HOME"] }}/Library/Logs/ansible-imessage-backup/stderr.log</string>
+</dict>
+</plist>

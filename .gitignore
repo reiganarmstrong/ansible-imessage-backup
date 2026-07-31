@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+*.retry
+.ansible/
+.venv/
+local.yml
+recovery-manifest.json
+backups/
+exports/
+
+# Never commit exported conversations or recovered media.
+imessage-backup-*/
+iMessage-Restore-Tests/
+Recovered Attachments/
+
+# Rebuildable private lifecycle indexes when a backup root is misconfigured to
+# point at the repository.
+/index.html
+/archive-catalog.json
+/message-index.json
+/pruning-report.json
+/pruning-report.html
+/.imessage-archive-state/

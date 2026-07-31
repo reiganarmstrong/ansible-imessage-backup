@@ -1,0 +1,91 @@
+---
+- name: Build a non-destructive iMessage pruning eligibility report
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate pruning-report settings
+      ansible.builtin.assert:
+        that:
+          - imessage_pruning_report_enabled is boolean
+          - >-
+            not imessage_pruning_report_enabled
+            or imessage_master_index_enabled
+          - imessage_pruning_minimum_verified_copies | int >= 1
+          - imessage_pruning_safety_hours | int >= 0
+          - imessage_pruning_report_name | length > 0
+          - imessage_pruning_html_report_name | length > 0
+        fail_msg: >-
+          Pruning eligibility requires the master index, at least one
+          complete remotely verified copy, and a non-negative safety interval.
+
+    - name: Require the master index inputs
+      ansible.builtin.stat:
+        path: "{{ imessage_backup_root }}/{{ item }}"
+      loop:
+        - "{{ imessage_archive_catalog_name }}"
+        - "{{ imessage_message_index_name }}"
+      register: imessage_pruning_inputs
+      when: imessage_pruning_report_enabled
+
+    - name: Validate the master index inputs
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              imessage_pruning_inputs.results
+              | selectattr("stat.exists", "equalto", false)
+              | list
+              | length
+            ) == 0
+          - >-
+            (
+              imessage_pruning_inputs.results
+              | selectattr("stat.isreg", "equalto", false)
+              | list
+              | length
+            ) == 0
+        fail_msg: >-
+          Rebuild the catalog before generating pruning eligibility.
+      when: imessage_pruning_report_enabled
+
+  tasks:
+    - name: Generate the safe-pruning eligibility report
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/build_pruning_report.py"
+          - "{{ imessage_backup_root }}"
+          - --catalog-name
+          - "{{ imessage_archive_catalog_name }}"
+          - --message-index-name
+          - "{{ imessage_message_index_name }}"
+          - --report-name
+          - "{{ imessage_pruning_report_name }}"
+          - --html-report-name
+          - "{{ imessage_pruning_html_report_name }}"
+          - --minimum-verified-copies
+          - "{{ imessage_pruning_minimum_verified_copies | string }}"
+          - --safety-hours
+          - "{{ imessage_pruning_safety_hours | string }}"
+      register: imessage_pruning_report_result
+      changed_when: true
+      when: imessage_pruning_report_enabled
+
+    - name: Report safe-pruning eligibility
+      ansible.builtin.debug:
+        msg: "{{ imessage_pruning_report_result.stdout | from_json }}"
+      when: imessage_pruning_report_enabled

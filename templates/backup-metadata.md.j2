@@ -1,0 +1,45 @@
+# iMessage Backup Metadata
+
+- Created: {{ ansible_facts["date_time"]["iso8601"] }}
+- Host: {{ ansible_facts["hostname"] }}
+- Exporter: `{{ imessage_exporter_version.stdout | trim }}`
+- Format: `{{ imessage_export_format }}`
+- Attachment copy method: `{{ imessage_copy_method }}`
+- Export directory: `{{ imessage_export_path }}`
+
+This archive was created by the `ansible-imessage-backup` automation. The
+export is plaintext and should be protected as sensitive private data.
+
+Source diagnostics are saved in `diagnostics.txt`. Structural verification is
+saved in `verification.json`. Redacted Apple download-metadata availability is
+saved in `mmcs-recovery-audit.json`.
+{% if imessage_preserve_source_data %}
+
+`{{ imessage_source_preservation_directory_name }}/chat.db` is a consistent
+snapshot of the source Messages database. `source-preservation.json` and
+`{{ imessage_source_preservation_directory_name }}/attachment-manifest.json`
+map every database attachment row to archived bytes or document why its source
+file was unavailable. Independent hash verification is saved in
+`source-preservation-verification.json`.
+{% set source_report = imessage_source_preservation.stdout | from_json %}
+
+- Locally readable rows preserved:
+  {{ source_report.summary.locally_readable_rows_preserved }}
+- Separately recovered rows:
+  {{ source_report.summary.separately_recovered_rows }}
+- Effectively unrecovered rows:
+  {{ source_report.summary.effectively_unrecovered_rows }}
+{% endif %}
+{% if imessage_ios_backup_path | length > 0 %}
+{% set ios_report = imessage_ios_recovery.stdout | from_json %}
+
+The Apple device-backup recovery report is saved in
+`ios-backup-recovery.json`.
+
+- Apple device rows mapped into the archive:
+  {{ ios_report.total_mapped_ios_recovery_rows }}
+- Hidden device-specific counterparts preserved:
+  {{ ios_report.hidden_counterpart_applied_count }}
+- Messages covered by hidden counterparts:
+  {{ ios_report.hidden_counterpart_messages_covered }}
+{% endif %}

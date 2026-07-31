@@ -1,0 +1,56 @@
+---
+- name: Permanently remove the superseded remote archive
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_remote_retirement_rclone_binary }}"
+      - purge
+      - >-
+        {{
+          imessage_nextcloud_remote | regex_replace('/+$', '')
+          ~ "/"
+          ~ imessage_superseded_archive_name
+        }}
+  changed_when: true
+
+- name: Remove the superseded remote verification marker
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_remote_retirement_rclone_binary }}"
+      - deletefile
+      - >-
+        {{
+          imessage_nextcloud_remote | regex_replace('/+$', '')
+          ~ "/"
+          ~ imessage_lifecycle_state_directory_name
+          ~ "/remote-verifications/"
+          ~ imessage_superseded_archive_name
+          ~ ".json"
+        }}
+  changed_when: true
+
+- name: Remove local state for the superseded remote archive
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - >-
+      {{
+        imessage_backup_root ~ "/" ~ imessage_lifecycle_state_directory_name
+        ~ "/remote-verifications/" ~ imessage_superseded_archive_name ~ ".json"
+      }}
+    - >-
+      {{
+        imessage_backup_root ~ "/" ~ imessage_lifecycle_state_directory_name
+        ~ "/remote-checks/" ~ imessage_superseded_archive_name ~ ".txt"
+      }}
+    - >-
+      {{
+        imessage_backup_root ~ "/" ~ imessage_lifecycle_state_directory_name
+        ~ "/catalog-cache-checks/" ~ imessage_superseded_archive_name ~ ".txt"
+      }}
+    - >-
+      {{
+        imessage_backup_root ~ "/" ~ imessage_lifecycle_state_directory_name
+        ~ "/" ~ imessage_catalog_cache_directory_name
+        ~ "/" ~ imessage_superseded_archive_name
+      }}

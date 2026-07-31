@@ -1,0 +1,58 @@
+---
+- name: Rebuild the private cross-archive iMessage catalog
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate catalog settings
+      ansible.builtin.assert:
+        that:
+          - imessage_master_index_enabled is boolean
+          - imessage_backup_root | length > 0
+          - imessage_backup_prefix | length > 0
+          - imessage_lifecycle_state_directory_name | length > 0
+          - imessage_catalog_cache_directory_name | length > 0
+          - imessage_master_index_name | length > 0
+          - imessage_archive_catalog_name | length > 0
+          - imessage_message_index_name | length > 0
+
+  tasks:
+    - name: Rebuild the master archive index
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/build_master_index.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+          - --state-directory-name
+          - "{{ imessage_lifecycle_state_directory_name }}"
+          - --catalog-cache-directory-name
+          - "{{ imessage_catalog_cache_directory_name }}"
+          - --index-name
+          - "{{ imessage_master_index_name }}"
+          - --catalog-name
+          - "{{ imessage_archive_catalog_name }}"
+          - --message-index-name
+          - "{{ imessage_message_index_name }}"
+      register: imessage_catalog_result
+      changed_when: true
+      when: imessage_master_index_enabled
+
+    - name: Report catalog coverage
+      ansible.builtin.debug:
+        msg: "{{ imessage_catalog_result.stdout | from_json }}"
+      when: imessage_master_index_enabled

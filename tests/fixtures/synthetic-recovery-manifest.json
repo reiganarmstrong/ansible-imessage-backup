@@ -1,0 +1,9 @@
+{
+  "recoveries": [
+    {
+      "message_guid": "TEST-GUID",
+      "missing_filename": "original.mov",
+      "recovered_file": "recovered.mov"
+    }
+  ]
+}

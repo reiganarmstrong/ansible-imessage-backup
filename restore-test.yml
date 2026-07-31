@@ -1,0 +1,386 @@
+---
+- name: Restore and independently validate an iMessage archive from Nextcloud
+  hosts: local
+  gather_facts: true
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate restore-test settings
+      ansible.builtin.assert:
+        that:
+          - imessage_nextcloud_enabled
+          - imessage_nextcloud_remote | length > 0
+          - "':' in imessage_nextcloud_remote"
+          - imessage_restore_root | length > 0
+          - imessage_restore_archive_name is string
+          - imessage_restore_run_id is string
+          - imessage_restore_keep_copy is boolean
+          - imessage_restore_verification_directory_name | length > 0
+          - >-
+            imessage_restore_verification_directory_name
+            == (imessage_restore_verification_directory_name | basename)
+          - imessage_restore_minimum_free_bytes_after | int >= 0
+          - imessage_restore_minimum_free_percent_after | float >= 0
+          - imessage_restore_minimum_free_percent_after | float <= 100
+        fail_msg: >-
+          Enable the verified Nextcloud workflow before running a restore test.
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_restore_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when: imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_restore_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_restore_rclone_lookup.stdout | default("") | trim
+          }}
+
+    - name: Require rclone
+      ansible.builtin.assert:
+        that:
+          - imessage_restore_rclone_binary | length > 0
+        fail_msg: "rclone is required to perform a Nextcloud restore test."
+
+    - name: Select the newest remotely verified archive by default
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/select_latest_remote_verified_archive.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+          - --state-directory-name
+          - "{{ imessage_lifecycle_state_directory_name }}"
+          - --remote-root
+          - "{{ imessage_nextcloud_remote }}"
+      register: imessage_restore_archive_selection
+      changed_when: false
+      when: imessage_restore_archive_name | length == 0
+
+    - name: Define the archive and unique restore destination
+      ansible.builtin.set_fact:
+        imessage_restore_effective_archive_name: >-
+          {{
+            imessage_restore_archive_name
+            if imessage_restore_archive_name | length > 0
+            else (
+              imessage_restore_archive_selection.stdout | from_json
+            ).archive_name
+          }}
+        imessage_restore_effective_run_id: >-
+          {{
+            imessage_restore_run_id
+            if imessage_restore_run_id | length > 0
+            else ansible_facts["date_time"]["iso8601_basic_short"]
+          }}
+
+    - name: Validate the selected archive name
+      ansible.builtin.assert:
+        that:
+          - >-
+            imessage_restore_effective_archive_name
+            == (imessage_restore_effective_archive_name | basename)
+          - >-
+            imessage_restore_effective_archive_name.startswith(
+              imessage_backup_prefix ~ "-"
+            )
+          - imessage_restore_effective_run_id | length > 0
+          - >-
+            imessage_restore_effective_run_id
+            == (imessage_restore_effective_run_id | basename)
+          - >-
+            (
+              imessage_restore_effective_run_id
+              | regex_search("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+            ) is not none
+        fail_msg: "The restore archive name must be one timestamped archive basename."
+
+    - name: Define restore paths
+      ansible.builtin.set_fact:
+        imessage_restore_remote_path: >-
+          {{
+            imessage_nextcloud_remote | regex_replace('/+$', '')
+            ~ "/"
+            ~ imessage_restore_effective_archive_name
+          }}
+        imessage_restore_destination: >-
+          {{
+            imessage_restore_root
+            ~ "/"
+            ~ imessage_restore_effective_archive_name
+            ~ "-restore-"
+            ~ imessage_restore_effective_run_id
+          }}
+        imessage_restore_state_directory: >-
+          {{ imessage_restore_root ~ "/.restore-state" }}
+        imessage_restore_persistent_verification_directory: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ imessage_restore_verification_directory_name
+          }}
+
+    - name: Define restore verification paths
+      ansible.builtin.set_fact:
+        imessage_restore_check_report: >-
+          {{
+            imessage_restore_state_directory
+            ~ "/"
+            ~ (imessage_restore_destination | basename)
+            ~ "-remote-check.txt"
+          }}
+        imessage_restore_persistent_result: >-
+          {{
+            imessage_restore_persistent_verification_directory
+            ~ "/"
+            ~ (imessage_restore_destination | basename)
+            ~ ".json"
+          }}
+        imessage_restore_persistent_check_report: >-
+          {{
+            imessage_restore_persistent_verification_directory
+            ~ "/"
+            ~ (imessage_restore_destination | basename)
+            ~ "-remote-check.txt"
+          }}
+
+    - name: Measure the remote archive before downloading
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_restore_rclone_binary }}"
+          - size
+          - "{{ imessage_restore_remote_path }}"
+          - --json
+      register: imessage_restore_remote_size
+      changed_when: false
+
+    - name: Evaluate local restore capacity
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/check_restore_capacity.py"
+          - "{{ imessage_restore_root }}"
+          - --restore-bytes
+          - >-
+            {{
+              (
+                imessage_restore_remote_size.stdout | from_json
+              ).bytes | string
+            }}
+          - --minimum-free-bytes-after
+          - "{{ imessage_restore_minimum_free_bytes_after | string }}"
+          - --minimum-free-percent-after
+          - "{{ imessage_restore_minimum_free_percent_after | string }}"
+      register: imessage_restore_capacity
+      changed_when: false
+
+    - name: Require enough disk space for a safe restore
+      ansible.builtin.assert:
+        that:
+          - (imessage_restore_capacity.stdout | from_json).passed
+        fail_msg: >-
+          Restore refused because it would leave too little free space:
+          {{ imessage_restore_capacity.stdout }}
+
+    - name: Protect an existing restore from replacement
+      ansible.builtin.stat:
+        path: "{{ imessage_restore_destination }}"
+      register: imessage_restore_destination_stat
+
+    - name: Require a new restore destination
+      ansible.builtin.assert:
+        that:
+          - not imessage_restore_destination_stat.stat.exists
+        fail_msg: >-
+          {{ imessage_restore_destination }} already exists; choose another
+          imessage_restore_run_id.
+
+    - name: Create private restore directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ imessage_restore_root }}"
+        - "{{ imessage_restore_state_directory }}"
+        - "{{ imessage_restore_destination }}"
+
+    - name: Download the immutable archive from Nextcloud
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_restore_rclone_binary }}"
+          - copy
+          - "{{ imessage_restore_remote_path }}"
+          - "{{ imessage_restore_destination }}"
+          - --create-empty-src-dirs
+          - --transfers
+          - "{{ imessage_nextcloud_transfers | string }}"
+          - --checkers
+          - "{{ imessage_nextcloud_checkers | string }}"
+      changed_when: true
+
+    - name: Byte-compare the restored copy with Nextcloud
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_restore_rclone_binary }}"
+          - check
+          - "{{ imessage_restore_destination }}"
+          - "{{ imessage_restore_remote_path }}"
+          - --download
+          - --combined
+          - "{{ imessage_restore_check_report }}"
+          - --checkers
+          - "{{ imessage_nextcloud_checkers | string }}"
+      changed_when: false
+
+    - name: Protect the restore byte-comparison report
+      ansible.builtin.file:
+        path: "{{ imessage_restore_check_report }}"
+        mode: "0600"
+
+    - name: Read the archived verification policy
+      ansible.builtin.slurp:
+        src: "{{ imessage_restore_destination }}/verification.json"
+      register: imessage_restore_original_verification
+
+    - name: Structurally validate restored HTML and local references
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_facts["python"]["executable"],
+              playbook_dir ~ "/scripts/verify_export.py",
+              imessage_restore_destination
+            ]
+            + (
+              ["--allow-broken-references"]
+              if (
+                (
+                  imessage_restore_original_verification.content
+                  | b64decode
+                  | from_json
+                ).allow_broken_references | default(false)
+              )
+              else []
+            )
+          }}
+      register: imessage_restore_structural_verification
+      changed_when: false
+
+    - name: Inspect the source-preservation report
+      ansible.builtin.stat:
+        path: "{{ imessage_restore_destination }}/source-preservation.json"
+      register: imessage_restore_source_preservation
+
+    - name: Re-hash preserved attachment data and check the database snapshot
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/verify_source_preservation.py"
+          - "{{ imessage_restore_destination }}"
+      register: imessage_restore_source_verification
+      changed_when: false
+      when: imessage_restore_source_preservation.stat.isreg | default(false)
+
+    - name: Save the restore-test result
+      ansible.builtin.copy:
+        dest: "{{ imessage_restore_destination }}/RESTORE-TEST.json"
+        mode: "0600"
+        content: >-
+          {{
+            {
+              "schema_version": 1,
+              "passed": true,
+              "archive_name": imessage_restore_effective_archive_name,
+              "remote_source": imessage_restore_remote_path,
+              "restore_copy_retained": imessage_restore_keep_copy,
+              "restored_at": now(
+                utc=true,
+                fmt="%Y-%m-%dT%H:%M:%SZ"
+              ),
+              "remote_byte_check": "rclone_check_download",
+              "structural_verification": (
+                imessage_restore_structural_verification.stdout | from_json
+              ),
+              "source_preservation_verification": (
+                imessage_restore_source_verification.stdout | from_json
+                if imessage_restore_source_verification is defined
+                and imessage_restore_source_verification.stdout is defined
+                else none
+              )
+            } | to_nice_json
+          }}
+
+    - name: Create the persistent restore-verification directory
+      ansible.builtin.file:
+        path: "{{ imessage_restore_persistent_verification_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Preserve the successful restore attestation
+      ansible.builtin.copy:
+        src: "{{ imessage_restore_destination }}/RESTORE-TEST.json"
+        dest: "{{ imessage_restore_persistent_result }}"
+        remote_src: true
+        mode: "0600"
+
+    - name: Preserve the remote byte-comparison report
+      ansible.builtin.copy:
+        src: "{{ imessage_restore_check_report }}"
+        dest: "{{ imessage_restore_persistent_check_report }}"
+        remote_src: true
+        mode: "0600"
+
+    - name: Remove the transient restored archive after successful verification
+      ansible.builtin.file:
+        path: "{{ imessage_restore_destination }}"
+        state: absent
+      when: not imessage_restore_keep_copy
+
+    - name: Remove the transient byte-comparison report
+      ansible.builtin.file:
+        path: "{{ imessage_restore_check_report }}"
+        state: absent
+      when: not imessage_restore_keep_copy
+
+    - name: Report the validated restore
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Restore test passed for
+            {{ imessage_restore_effective_archive_name }}.
+          - >-
+            Durable attestation:
+            {{ imessage_restore_persistent_result }}
+          - >-
+            {{
+              "Restored copy retained at " ~ imessage_restore_destination
+              ~ "; open its HTML and sample conversations and media."
+              if imessage_restore_keep_copy
+              else
+              "Transient restored copy removed after every automated check passed."
+            }}

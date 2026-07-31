@@ -1,0 +1,382 @@
+---
+- name: Report local iMessage archive lifecycle status
+  hosts: local
+  gather_facts: true
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+  tasks:
+    - name: Inspect the backup root
+      ansible.builtin.stat:
+        path: "{{ imessage_backup_root }}"
+      register: imessage_status_backup_root
+
+    - name: Discover local archive directories
+      ansible.builtin.find:
+        paths: "{{ imessage_backup_root }}"
+        patterns:
+          - "{{ imessage_backup_prefix }}-*"
+        recurse: false
+        file_type: directory
+      register: imessage_status_archives
+      when:
+        - imessage_status_backup_root.stat.exists
+        - imessage_status_backup_root.stat.isdir
+
+    - name: Inspect local archive verification reports
+      ansible.builtin.stat:
+        path: "{{ item.path }}/verification.json"
+      loop: "{{ imessage_status_archives.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: imessage_status_archive_verification_stats
+
+    - name: Read local archive verification reports
+      ansible.builtin.slurp:
+        src: "{{ item.item.path }}/verification.json"
+      loop: >-
+        {{
+          imessage_status_archive_verification_stats.results
+          | default([])
+          | selectattr("stat.exists", "equalto", true)
+          | list
+        }}
+      loop_control:
+        label: "{{ item.item.path | basename }}"
+      register: imessage_status_archive_verifications
+
+    - name: Initialize the verified archive list
+      ansible.builtin.set_fact:
+        imessage_status_verified_archive_names: []
+
+    - name: Record passing local archives
+      ansible.builtin.set_fact:
+        imessage_status_verified_archive_names: >-
+          {{
+            imessage_status_verified_archive_names
+            + [item.item.item.path | basename]
+          }}
+      loop: "{{ imessage_status_archive_verifications.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.path | basename }}"
+      when: (item.content | b64decode | from_json).passed | default(false)
+
+    - name: Inspect the remote marker directory
+      ansible.builtin.stat:
+        path: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/remote-verifications"
+          }}
+      register: imessage_status_remote_marker_directory
+
+    - name: Discover remote verification markers
+      ansible.builtin.find:
+        paths: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/remote-verifications"
+          }}
+        patterns:
+          - "*.json"
+        recurse: false
+        file_type: file
+      register: imessage_status_remote_markers
+      when:
+        - imessage_status_remote_marker_directory.stat.exists
+        - imessage_status_remote_marker_directory.stat.isdir
+
+    - name: Inspect the compact catalog-cache directory
+      ansible.builtin.stat:
+        path: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ imessage_catalog_cache_directory_name
+          }}
+      register: imessage_status_catalog_cache_directory
+
+    - name: Discover compact remote archive catalog caches
+      ansible.builtin.find:
+        paths: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ imessage_catalog_cache_directory_name
+          }}
+        patterns:
+          - "{{ imessage_backup_prefix }}-*"
+        recurse: false
+        file_type: directory
+      register: imessage_status_catalog_caches
+      when:
+        - imessage_status_catalog_cache_directory.stat.exists
+        - imessage_status_catalog_cache_directory.stat.isdir
+
+    - name: Inspect the restore-verification directory
+      ansible.builtin.stat:
+        path: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ imessage_restore_verification_directory_name
+          }}
+      register: imessage_status_restore_verification_directory
+
+    - name: Discover durable restore attestations
+      ansible.builtin.find:
+        paths: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ imessage_restore_verification_directory_name
+          }}
+        patterns:
+          - "*.json"
+        recurse: false
+        file_type: file
+      register: imessage_status_restore_verifications
+      when:
+        - imessage_status_restore_verification_directory.stat.exists
+        - imessage_status_restore_verification_directory.stat.isdir
+
+    - name: Inspect generated lifecycle and scheduler files
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      loop:
+        - name: master_index
+          path: "{{ imessage_backup_root }}/{{ imessage_master_index_name }}"
+        - name: archive_catalog
+          path: "{{ imessage_backup_root }}/{{ imessage_archive_catalog_name }}"
+        - name: pruning_report
+          path: "{{ imessage_backup_root }}/{{ imessage_pruning_report_name }}"
+        - name: local_retirement_report
+          path: >-
+            {{
+              imessage_backup_root
+              ~ "/"
+              ~ imessage_lifecycle_state_directory_name
+              ~ "/local-retirement.json"
+            }}
+        - name: remote_superseded_retirement_report
+          path: >-
+            {{
+              imessage_backup_root
+              ~ "/"
+              ~ imessage_lifecycle_state_directory_name
+              ~ "/"
+              ~ imessage_remote_superseded_retirement_report_name
+            }}
+        - name: schedule_wrapper
+          path: "{{ ansible_facts['env']['HOME'] }}/.local/bin/ansible-imessage-backup"
+        - name: launch_agent
+          path: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/{{ imessage_schedule_label }}.plist"
+        - name: last_run
+          path: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup/last-run.json"
+        - name: last_success
+          path: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup/last-success.json"
+        - name: last_skipped
+          path: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup/last-skipped.json"
+      loop_control:
+        label: "{{ item.name }}"
+      register: imessage_status_files
+
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_status_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when: imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the available rclone binary
+      ansible.builtin.set_fact:
+        imessage_status_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_status_rclone_lookup.stdout | default("") | trim
+          }}
+
+    - name: List configured rclone remotes
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_status_rclone_binary }}"
+          - listremotes
+      register: imessage_status_rclone_remotes
+      changed_when: false
+      failed_when: false
+      when: imessage_status_rclone_binary | length > 0
+
+    - name: Select archives pending at the configured remote
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/select_pending_verified_archives.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+          - --state-directory-name
+          - "{{ imessage_lifecycle_state_directory_name }}"
+          - --remote-root
+          - "{{ imessage_nextcloud_remote }}"
+      register: imessage_status_pending_archives
+      changed_when: false
+      when:
+        - imessage_nextcloud_enabled
+        - imessage_nextcloud_remote | length > 0
+
+    - name: Read the last scheduler run status
+      ansible.builtin.slurp:
+        src: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup/last-run.json"
+      register: imessage_status_last_run
+      when: >-
+        (
+          imessage_status_files.results
+          | selectattr("item.name", "equalto", "last_run")
+          | map(attribute="stat.exists")
+          | first
+        )
+
+    - name: Read the last skipped scheduler invocation
+      ansible.builtin.slurp:
+        src: "{{ ansible_facts['env']['HOME'] }}/Library/Application Support/ansible-imessage-backup/last-skipped.json"
+      register: imessage_status_last_skipped
+      when: >-
+        (
+          imessage_status_files.results
+          | selectattr("item.name", "equalto", "last_skipped")
+          | map(attribute="stat.exists")
+          | first
+        )
+
+    - name: Check whether the LaunchAgent is loaded
+      ansible.builtin.command:
+        argv:
+          - /bin/launchctl
+          - print
+          - "gui/{{ ansible_facts['user_uid'] }}/{{ imessage_schedule_label }}"
+      register: imessage_status_launch_agent
+      changed_when: false
+      failed_when: false
+      when: ansible_facts["system"] == "Darwin"
+
+    - name: Report lifecycle status
+      ansible.builtin.debug:
+        msg:
+          backup_root: "{{ imessage_backup_root }}"
+          local_archive_directory_count: >-
+            {{ imessage_status_archives.matched | default(0) }}
+          locally_verified_archive_count: >-
+            {{ imessage_status_verified_archive_names | length }}
+          unverified_or_legacy_archive_count: >-
+            {{
+              (imessage_status_archives.matched | default(0) | int)
+              - (imessage_status_verified_archive_names | length)
+            }}
+          newest_locally_verified_archive: >-
+            {{
+              (
+                imessage_status_verified_archive_names
+                | sort
+                | last
+                | default("")
+              )
+            }}
+          remote_verification_marker_count: >-
+            {{ imessage_status_remote_markers.matched | default(0) }}
+          compact_catalog_cache_count: >-
+            {{ imessage_status_catalog_caches.matched | default(0) }}
+          durable_restore_attestation_count: >-
+            {{ imessage_status_restore_verifications.matched | default(0) }}
+          local_retirement_enabled: "{{ imessage_local_retirement_enabled }}"
+          local_retirement_keep_count: >-
+            {{ imessage_local_retirement_keep_count }}
+          local_retirement_requires_restore_attestation: >-
+            {{
+              imessage_local_retirement_require_restore_attestation
+            }}
+          pruning_minimum_verified_copies: >-
+            {{ imessage_pruning_minimum_verified_copies }}
+          remote_superseded_retirement_enabled: >-
+            {{ imessage_remote_superseded_retirement_enabled }}
+          pending_remote_archive_count: >-
+            {{
+              (
+                imessage_status_pending_archives.stdout
+                | from_json
+              ).count
+              if imessage_status_pending_archives is defined
+              and imessage_status_pending_archives.stdout is defined
+              else none
+            }}
+          nextcloud_enabled: "{{ imessage_nextcloud_enabled }}"
+          nextcloud_remote: "{{ imessage_nextcloud_remote }}"
+          rclone_binary: "{{ imessage_status_rclone_binary }}"
+          rclone_remotes: >-
+            {{
+              imessage_status_rclone_remotes.stdout_lines | default([])
+            }}
+          schedule_loaded: >-
+            {{
+              imessage_status_launch_agent.rc | default(1) == 0
+            }}
+          generated_files: >-
+            {{
+              dict(
+                imessage_status_files.results
+                | map(attribute="item.name")
+                | zip(
+                    imessage_status_files.results
+                    | map(attribute="stat.exists")
+                  )
+              )
+            }}
+          last_run: >-
+            {{
+              (
+                imessage_status_last_run.content
+                | b64decode
+                | from_json
+              )
+              if imessage_status_last_run is defined
+              and imessage_status_last_run.content is defined
+              else none
+            }}
+          last_skipped: >-
+            {{
+              (
+                imessage_status_last_skipped.content
+                | b64decode
+                | from_json
+              )
+              if imessage_status_last_skipped is defined
+              and imessage_status_last_skipped.content is defined
+              else none
+            }}

@@ -1,0 +1,64 @@
+---
+# Copy this file to local.yml. Git ignores local.yml.
+
+# Local staging location. It does not need to be inside a sync folder when the
+# verified rclone publication workflow below is enabled.
+imessage_backup_root: "{{ lookup('ansible.builtin.env', 'HOME') }}/Documents/Backups/iMessage"
+
+# Recommended: configure a Nextcloud WebDAV remote with `rclone config`, then
+# upload each immutable archive and verify every remote byte.
+# imessage_nextcloud_enabled: true
+# imessage_nextcloud_remote: "nextcloud:Backups/iMessage"
+# imessage_nextcloud_rclone_binary: "/opt/homebrew/bin/rclone"
+# imessage_nextcloud_transfers: 4
+# imessage_nextcloud_checkers: 4
+
+# Optional: after remote byte verification, compact catalog hydration, and at
+# least one successful restore test, retire full local staging archives while
+# retaining all remote data and searchable local catalog metadata.
+# imessage_local_retirement_enabled: false
+# imessage_local_retirement_keep_count: 0
+# imessage_local_retirement_require_restore_attestation: true
+
+# Single-copy history: one verified, attachment-complete remote copy is enough
+# before a message is listed for manual pruning. The safety interval retains a
+# recent boundary so new activity is not immediately proposed for removal.
+imessage_pruning_minimum_verified_copies: 1
+imessage_pruning_safety_hours: 24
+
+# Optional and destructive: delete an older remote archive only when verified
+# compact catalogs prove that every message and preserved attachment in it is
+# present in later verified archives. Archives containing unique history stay.
+# imessage_remote_superseded_retirement_enabled: false
+
+# Optional: preserve separately recovered files in every new backup.
+# imessage_recovered_assets_source: "/absolute/path/to/Recovered Attachments"
+# imessage_recovery_manifest: "{{ playbook_dir }}/recovery-manifest.json"
+# imessage_recovered_source_map: "/absolute/path/to/recovery-source-map.json"
+
+# Optional Finder/iTunes backup used to recover otherwise missing attachments.
+# imessage_ios_backup_path: >-
+#   {{ lookup('ansible.builtin.env', 'HOME')
+#      ~ "/Library/Application Support/MobileSync/Backup/device-id" }}
+# imessage_recover_ios_device_variants: false
+# imessage_preserve_ios_hidden_counterparts: true
+
+# Keep original HEIC files and generate JPEG copies for local HTML viewing.
+imessage_create_heic_previews: true
+imessage_heic_preview_quality: "high"
+imessage_heic_preview_workers: 8
+
+# Set true only when diagnostics document known, unrecoverable source attachments.
+imessage_allow_broken_references: false
+
+# Sunday at 03:00. launchd uses 1 for Sunday and 7 for Saturday.
+imessage_schedule_weekday: 1
+imessage_schedule_hour: 3
+imessage_schedule_minute: 0
+imessage_schedule_log_retention_days: 90
+
+# Restore tests default to leaving at least 20 GiB and 10% of the destination
+# filesystem free after materializing the remote archive.
+# imessage_restore_minimum_free_bytes_after: 21474836480
+# imessage_restore_minimum_free_percent_after: 10
+# imessage_restore_keep_copy: true

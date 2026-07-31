@@ -1,0 +1,114 @@
+---
+- name: Repair the backlog of locally verified iMessage archives in Nextcloud
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate Nextcloud backlog settings
+      ansible.builtin.assert:
+        that:
+          - imessage_nextcloud_enabled is boolean
+          - not imessage_nextcloud_enabled or imessage_nextcloud_remote | length > 0
+          - not imessage_nextcloud_enabled or ':' in imessage_nextcloud_remote
+          - imessage_backup_root | length > 0
+          - imessage_backup_prefix | length > 0
+          - imessage_nextcloud_transfers | int >= 1
+          - imessage_nextcloud_checkers | int >= 1
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - imessage_nextcloud_enabled
+        - imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_effective_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_rclone_lookup.stdout | default('') | trim
+          }}
+      when: imessage_nextcloud_enabled
+
+    - name: Require rclone
+      ansible.builtin.assert:
+        that:
+          - imessage_effective_rclone_binary | length > 0
+        fail_msg: "rclone is required to repair the Nextcloud archive backlog."
+      when: imessage_nextcloud_enabled
+
+    - name: Read the rclone version
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_rclone_binary }}"
+          - version
+      register: imessage_rclone_version
+      changed_when: false
+      when: imessage_nextcloud_enabled
+
+    - name: Select locally verified archives pending at this remote
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/select_pending_verified_archives.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+          - --state-directory-name
+          - "{{ imessage_lifecycle_state_directory_name }}"
+          - --remote-root
+          - "{{ imessage_nextcloud_remote }}"
+      register: imessage_nextcloud_pending_selection
+      changed_when: false
+      when: imessage_nextcloud_enabled
+
+    - name: Publish every pending verified archive
+      ansible.builtin.include_tasks: tasks/publish_archive.yml
+      vars:
+        imessage_archive_to_publish: "{{ imessage_pending_archive_path }}"
+      loop: >-
+        {{
+          (
+            imessage_nextcloud_pending_selection.stdout | from_json
+          ).archive_paths
+        }}
+      loop_control:
+        loop_var: imessage_pending_archive_path
+        label: "{{ imessage_pending_archive_path | basename }}"
+      when: imessage_nextcloud_enabled
+
+    - name: Report archive backlog status
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (
+              imessage_nextcloud_pending_selection.stdout | from_json
+            ).count
+          }} locally verified archive(s) required remote publication.
+      when: imessage_nextcloud_enabled
+
+    - name: Report disabled Nextcloud backlog repair
+      ansible.builtin.debug:
+        msg: "Nextcloud publication is disabled; no remote backlog was processed."
+      when: not imessage_nextcloud_enabled

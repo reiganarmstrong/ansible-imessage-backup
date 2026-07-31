@@ -1,0 +1,9 @@
+{
+  "recoveries": [
+    {
+      "attachment_row_ids": [123, 124],
+      "archive_path": "Recovered Attachments/recovered-photo.heic",
+      "sha256": "replace-with-the-recovered-file-sha256"
+    }
+  ]
+}

@@ -1,0 +1,155 @@
+---
+- name: Retire full local iMessage staging archives after all safety gates pass
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate local-retirement settings
+      ansible.builtin.assert:
+        that:
+          - imessage_local_retirement_enabled is boolean
+          - imessage_local_retirement_keep_count | int >= 0
+          - >-
+            imessage_local_retirement_require_restore_attestation
+            is boolean
+          - >-
+            not imessage_local_retirement_enabled
+            or imessage_nextcloud_enabled
+          - >-
+            not imessage_local_retirement_enabled
+            or imessage_nextcloud_remote | length > 0
+          - >-
+            not imessage_local_retirement_enabled
+            or ':' in imessage_nextcloud_remote
+          - >-
+            not imessage_local_retirement_enabled
+            or imessage_catalog_remote_hydration_enabled
+        fail_msg: >-
+          Local retirement requires verified Nextcloud publication and compact
+          catalog hydration. It is disabled by default.
+
+  tasks:
+    - name: Select full local archives that passed every retirement gate
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_playbook_python,
+              playbook_dir ~ "/scripts/select_retirable_local_archives.py",
+              imessage_backup_root,
+              "--backup-prefix",
+              imessage_backup_prefix,
+              "--state-directory-name",
+              imessage_lifecycle_state_directory_name,
+              "--cache-directory-name",
+              imessage_catalog_cache_directory_name,
+              "--remote-root",
+              imessage_nextcloud_remote,
+              "--keep-count",
+              imessage_local_retirement_keep_count | string
+            ]
+            + (
+              ["--require-restore-attestation"]
+              if imessage_local_retirement_require_restore_attestation
+              else []
+            )
+            + (
+              ["--protected-path", imessage_recovered_assets_source]
+              if imessage_recovered_assets_source | length > 0
+              else []
+            )
+            + (
+              ["--protected-path", imessage_recovered_source_map]
+              if imessage_recovered_source_map | length > 0
+              else []
+            )
+            + (
+              ["--protected-path", imessage_recovery_manifest]
+              if imessage_recovery_manifest | length > 0
+              else []
+            )
+            + (
+              ["--protected-path", imessage_ios_backup_path]
+              if imessage_ios_backup_path | length > 0
+              else []
+            )
+          }}
+      register: imessage_local_retirement_selection
+      changed_when: false
+      when: imessage_local_retirement_enabled
+
+    - name: Retire each verified full local staging archive
+      ansible.builtin.file:
+        path: "{{ imessage_local_retirement_archive_path }}"
+        state: absent
+      loop: >-
+        {{
+          (
+            imessage_local_retirement_selection.stdout | from_json
+          ).archive_paths
+        }}
+      loop_control:
+        loop_var: imessage_local_retirement_archive_path
+        label: "{{ imessage_local_retirement_archive_path | basename }}"
+      when: imessage_local_retirement_enabled
+
+    - name: Save the local-retirement report
+      ansible.builtin.copy:
+        dest: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/local-retirement.json"
+          }}
+        mode: "0600"
+        content: >-
+          {{
+            (
+              imessage_local_retirement_selection.stdout | from_json
+            )
+            | combine(
+              {
+                "schema_version": 1,
+                "automatic_deletion_performed": (
+                  (
+                    imessage_local_retirement_selection.stdout | from_json
+                  ).count | int > 0
+                ),
+                "retired_at": now(
+                  utc=true,
+                  fmt="%Y-%m-%dT%H:%M:%SZ"
+                )
+              }
+            )
+            | to_nice_json
+          }}
+      when: imessage_local_retirement_enabled
+
+    - name: Report local archive retirement
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            imessage_local_retirement_selection.stdout | from_json
+          }}
+      when: imessage_local_retirement_enabled
+
+    - name: Report disabled local retirement
+      ansible.builtin.debug:
+        msg: >-
+          Full local archive retirement is disabled; no staging archive was
+          deleted.
+      when: not imessage_local_retirement_enabled

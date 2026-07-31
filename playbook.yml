@@ -1,0 +1,522 @@
+---
+- name: Export and verify the local iMessage archive
+  hosts: local
+  gather_facts: true
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Require macOS
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["system"] == "Darwin"
+        fail_msg: "This playbook exports the live macOS Messages database and must run on macOS."
+
+    - name: Validate export settings
+      ansible.builtin.assert:
+        that:
+          - imessage_export_format in ["html", "txt"]
+          - imessage_copy_method in ["clone", "basic", "full", "disabled"]
+          - imessage_backup_root | length > 0
+          - imessage_backup_prefix | length > 0
+          - imessage_backup_prefix == (imessage_backup_prefix | basename)
+          - >-
+            (
+              imessage_backup_prefix
+              | regex_search("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+            ) is not none
+          - imessage_additional_args is sequence
+          - imessage_additional_args is not string
+          - imessage_create_heic_previews is boolean
+          - imessage_heic_preview_quality in ["low", "normal", "high", "best"]
+          - imessage_heic_preview_max_pixels | int >= 512
+          - imessage_heic_preview_workers | int >= 1
+          - imessage_heic_preview_workers | int <= 32
+          - imessage_allow_broken_references is boolean
+          - imessage_preserve_source_data is boolean
+          - imessage_messages_database | length > 0
+          - imessage_source_preservation_directory_name | length > 0
+          - imessage_patch_source_attachments_into_html is boolean
+          - imessage_recovered_source_map is string
+          - imessage_ios_backup_path is string
+          - imessage_recover_ios_device_variants is boolean
+          - imessage_preserve_ios_hidden_counterparts is boolean
+        fail_msg: "Review the imessage-exporter settings in vars/defaults.yml or local.yml."
+
+    - name: Locate imessage-exporter
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - imessage-exporter
+      register: imessage_exporter_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Select the imessage-exporter binary
+      ansible.builtin.set_fact:
+        imessage_effective_exporter_binary: >-
+          {{
+            imessage_exporter_binary
+            if imessage_exporter_binary | length > 0
+            else imessage_exporter_lookup.stdout | trim
+          }}
+
+    - name: Require imessage-exporter
+      ansible.builtin.assert:
+        that:
+          - imessage_effective_exporter_binary | length > 0
+        fail_msg: >-
+          imessage-exporter was not found. Install it with
+          `brew install imessage-exporter` or set imessage_exporter_binary
+          to its absolute path.
+
+    - name: Inspect the selected exporter
+      ansible.builtin.stat:
+        path: "{{ imessage_effective_exporter_binary }}"
+        follow: true
+      register: imessage_exporter_stat
+
+    - name: Require an executable exporter
+      ansible.builtin.assert:
+        that:
+          - imessage_exporter_stat.stat.exists
+          - imessage_exporter_stat.stat.isreg
+          - imessage_exporter_stat.stat.executable
+        fail_msg: "{{ imessage_effective_exporter_binary }} is not an executable file."
+
+    - name: Read the exporter version
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_exporter_binary }}"
+          - --version
+      register: imessage_exporter_version
+      changed_when: false
+
+    - name: Choose a unique run identifier
+      ansible.builtin.set_fact:
+        imessage_effective_run_id: >-
+          {{
+            imessage_export_run_id
+            if imessage_export_run_id | length > 0
+            else ansible_facts["date_time"]["iso8601_basic_short"]
+          }}
+
+    - name: Build the export path
+      ansible.builtin.set_fact:
+        imessage_export_path: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_backup_prefix
+            ~ "-"
+            ~ imessage_effective_run_id
+          }}
+
+    - name: Validate the unique run identifier
+      ansible.builtin.assert:
+        that:
+          - imessage_effective_run_id | length > 0
+          - imessage_effective_run_id == (imessage_effective_run_id | basename)
+          - >-
+            (
+              imessage_effective_run_id
+              | regex_search("^[A-Za-z0-9][A-Za-z0-9._-]*$")
+            ) is not none
+        fail_msg: >-
+          imessage_export_run_id must be a single safe directory-name
+          component.
+
+    - name: Check whether this export already exists
+      ansible.builtin.stat:
+        path: "{{ imessage_export_path }}"
+      register: imessage_export_path_stat
+
+    - name: Protect existing backups from replacement
+      ansible.builtin.assert:
+        that:
+          - not imessage_export_path_stat.stat.exists
+        fail_msg: >-
+          {{ imessage_export_path }} already exists. Choose another
+          imessage_export_run_id; this playbook never overwrites an export.
+
+  tasks:
+    - name: Create the private backup root
+      ansible.builtin.file:
+        path: "{{ imessage_backup_root }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create the new private export directory
+      ansible.builtin.file:
+        path: "{{ imessage_export_path }}"
+        state: directory
+        mode: "0700"
+
+    - name: Assemble the exporter command
+      ansible.builtin.set_fact:
+        imessage_export_command: >-
+          {{
+            [
+              imessage_effective_exporter_binary,
+              "--format", imessage_export_format,
+              "--copy-method", imessage_copy_method,
+              "--export-path", imessage_export_path,
+              "--no-progress"
+            ]
+            + imessage_additional_args
+          }}
+
+    - name: Export messages and attachments
+      ansible.builtin.command:
+        argv: "{{ imessage_export_command }}"
+      register: imessage_export_result
+      changed_when: true
+
+    - name: Run source database diagnostics
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_exporter_binary }}"
+          - --diagnostics
+      register: imessage_diagnostics
+      changed_when: false
+
+    - name: Save source diagnostics with the export
+      ansible.builtin.copy:
+        dest: "{{ imessage_export_path }}/diagnostics.txt"
+        mode: "0600"
+        content: |
+          {{ imessage_diagnostics.stdout }}
+          {{ imessage_diagnostics.stderr }}
+
+    - name: Create browser-compatible HEIC previews
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/create_heic_previews.py"
+          - "{{ imessage_export_path }}"
+          - --quality
+          - "{{ imessage_heic_preview_quality }}"
+          - --max-pixels
+          - "{{ imessage_heic_preview_max_pixels | string }}"
+          - --workers
+          - "{{ imessage_heic_preview_workers | string }}"
+      register: imessage_heic_preview_result
+      changed_when: imessage_heic_preview_result.rc == 0
+      when:
+        - imessage_export_format == "html"
+        - imessage_create_heic_previews
+
+    - name: Save the HEIC preview report
+      ansible.builtin.copy:
+        dest: "{{ imessage_export_path }}/heic-preview-report.json"
+        mode: "0600"
+        content: "{{ imessage_heic_preview_result.stdout }}\n"
+      when:
+        - imessage_export_format == "html"
+        - imessage_create_heic_previews
+
+    - name: Inspect the optional recovered-assets source
+      ansible.builtin.stat:
+        path: "{{ imessage_recovered_assets_source }}"
+      register: imessage_recovered_assets_stat
+      when: imessage_recovered_assets_source | length > 0
+
+    - name: Require a valid recovered-assets source
+      ansible.builtin.assert:
+        that:
+          - imessage_recovered_assets_stat.stat.exists
+          - imessage_recovered_assets_stat.stat.isdir
+        fail_msg: "{{ imessage_recovered_assets_source }} is not a directory."
+      when: imessage_recovered_assets_source | length > 0
+
+    - name: Preserve separately recovered assets
+      ansible.builtin.copy:
+        src: "{{ imessage_recovered_assets_source }}/"
+        dest: >-
+          {{
+            imessage_export_path
+            ~ "/"
+            ~ imessage_recovered_assets_directory_name
+            ~ "/"
+          }}
+        remote_src: true
+        mode: preserve
+      when: imessage_recovered_assets_source | length > 0
+
+    - name: Inspect the optional recovery manifest
+      ansible.builtin.stat:
+        path: "{{ imessage_recovery_manifest }}"
+      register: imessage_recovery_manifest_stat
+      when: imessage_recovery_manifest | length > 0
+
+    - name: Validate recovery manifest prerequisites
+      ansible.builtin.assert:
+        that:
+          - imessage_recovered_assets_source | length > 0
+          - imessage_recovery_manifest_stat.stat.exists
+          - imessage_recovery_manifest_stat.stat.isreg
+        fail_msg: >-
+          A recovery manifest requires both a valid manifest file and
+          imessage_recovered_assets_source.
+      when: imessage_recovery_manifest | length > 0
+
+    - name: Reconnect recovered files to conversation HTML
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/apply_recoveries.py"
+          - "{{ imessage_export_path }}"
+          - >-
+            {{
+              imessage_export_path
+              ~ "/"
+              ~ imessage_recovered_assets_directory_name
+            }}
+          - "{{ imessage_recovery_manifest }}"
+      register: imessage_recovery_application
+      changed_when: >-
+        (imessage_recovery_application.stdout | from_json).patched_count | int > 0
+      when: imessage_recovery_manifest | length > 0
+
+    - name: Save the recovery application report
+      ansible.builtin.copy:
+        dest: "{{ imessage_export_path }}/recovery-application.json"
+        mode: "0600"
+        content: "{{ imessage_recovery_application.stdout }}\n"
+      when: imessage_recovery_manifest | length > 0
+
+    - name: Copy the optional recovery source map into the export
+      ansible.builtin.copy:
+        src: "{{ imessage_recovered_source_map }}"
+        dest: >-
+          {{
+            imessage_export_path
+            ~ "/"
+            ~ imessage_recovered_assets_directory_name
+            ~ "/recovery-source-map.json"
+          }}
+        remote_src: true
+        mode: "0600"
+      when: imessage_recovered_source_map | length > 0
+
+    - name: Preserve every locally readable Messages record
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_facts["python"]["executable"],
+              playbook_dir ~ "/scripts/preserve_source_data.py",
+              imessage_export_path,
+              "--database", imessage_messages_database,
+              "--directory-name", imessage_source_preservation_directory_name
+            ]
+            + (
+              ["--no-patch-html"]
+              if (
+                imessage_export_format != "html"
+                or not imessage_patch_source_attachments_into_html
+              )
+              else []
+            )
+            + (
+              ["--recovered-source-map", imessage_recovered_source_map]
+              if imessage_recovered_source_map | length > 0
+              else []
+            )
+          }}
+      register: imessage_source_preservation
+      changed_when: true
+      when: imessage_preserve_source_data
+
+    - name: Inspect the optional Apple device backup
+      ansible.builtin.stat:
+        path: "{{ imessage_ios_backup_path }}/Manifest.db"
+      register: imessage_ios_backup_manifest
+      when: imessage_ios_backup_path | length > 0
+
+    - name: Require a usable Apple device backup
+      ansible.builtin.assert:
+        that:
+          - imessage_preserve_source_data
+          - imessage_ios_backup_manifest.stat.exists
+          - imessage_ios_backup_manifest.stat.isreg
+        fail_msg: >-
+          iOS recovery requires source preservation and a device backup
+          directory containing Manifest.db.
+      when: imessage_ios_backup_path | length > 0
+
+    - name: Recover missing attachments from the Apple device backup
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_facts["python"]["executable"],
+              playbook_dir ~ "/scripts/recover_from_ios_backup.py",
+              imessage_export_path,
+              imessage_ios_backup_path,
+              "--destination-directory",
+              imessage_recovered_assets_directory_name ~ "/iOS Backup",
+              "--source-map",
+              (
+                imessage_export_path
+                ~ "/"
+                ~ imessage_recovered_assets_directory_name
+                ~ "/recovery-source-map.json"
+              ),
+              "--apply"
+            ]
+            + (
+              ["--include-device-variants"]
+              if imessage_recover_ios_device_variants
+              else []
+            )
+            + (
+              ["--preserve-hidden-counterparts"]
+              if imessage_preserve_ios_hidden_counterparts
+              else []
+            )
+          }}
+      register: imessage_ios_recovery
+      changed_when: >-
+        (
+          (imessage_ios_recovery.stdout | from_json).applied_count | int > 0
+          or
+          (
+            (imessage_ios_recovery.stdout | from_json)
+            .hidden_counterpart_applied_count | int > 0
+          )
+        )
+      when: imessage_ios_backup_path | length > 0
+
+    - name: Refresh source preservation after Apple device recovery
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/preserve_source_data.py"
+          - "{{ imessage_export_path }}"
+          - --database
+          - "{{ imessage_messages_database }}"
+          - --directory-name
+          - "{{ imessage_source_preservation_directory_name }}"
+          - --recovered-source-map
+          - >-
+            {{
+              imessage_export_path
+              ~ "/"
+              ~ imessage_recovered_assets_directory_name
+              ~ "/recovery-source-map.json"
+            }}
+      register: imessage_source_preservation
+      changed_when: true
+      when: imessage_ios_backup_path | length > 0
+
+    - name: Create previews for HEIC files recovered from the device backup
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/create_heic_previews.py"
+          - "{{ imessage_export_path }}"
+          - --quality
+          - "{{ imessage_heic_preview_quality }}"
+          - --max-pixels
+          - "{{ imessage_heic_preview_max_pixels | string }}"
+          - --workers
+          - "{{ imessage_heic_preview_workers | string }}"
+          - --report-path
+          - "{{ imessage_export_path }}/heic-preview-report.json"
+          - --merge-report
+          - "{{ imessage_export_path }}/heic-preview-report.json"
+      register: imessage_heic_preview_result
+      changed_when: >-
+        (imessage_heic_preview_result.stdout | from_json).created_count | int > 0
+      when:
+        - imessage_ios_backup_path | length > 0
+        - imessage_export_format == "html"
+        - imessage_create_heic_previews
+
+    - name: Independently verify source preservation
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/verify_source_preservation.py"
+          - "{{ imessage_export_path }}"
+          - --verify-live-source
+      register: imessage_source_preservation_verification
+      changed_when: false
+      when: imessage_preserve_source_data
+
+    - name: Audit unavailable attachments for Apple download metadata
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_facts['python']['executable'] }}"
+          - "{{ playbook_dir }}/scripts/audit_mmcs_recovery.py"
+          - "{{ imessage_export_path }}"
+          - --report-path
+          - "{{ imessage_export_path }}/mmcs-recovery-audit.json"
+      register: imessage_mmcs_audit
+      changed_when: false
+      when: imessage_preserve_source_data
+
+    - name: Save the source-preservation verification report
+      ansible.builtin.copy:
+        dest: "{{ imessage_export_path }}/source-preservation-verification.json"
+        mode: "0600"
+        content: "{{ imessage_source_preservation_verification.stdout }}\n"
+      when: imessage_preserve_source_data
+
+    - name: Write backup metadata
+      ansible.builtin.template:
+        src: templates/backup-metadata.md.j2
+        dest: "{{ imessage_export_path }}/BACKUP-METADATA.md"
+        mode: "0600"
+
+    - name: Verify the completed export
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_facts["python"]["executable"],
+              playbook_dir ~ "/scripts/verify_export.py",
+              imessage_export_path
+            ]
+            + (
+              ["--allow-broken-references"]
+              if imessage_allow_broken_references
+              else []
+            )
+          }}
+      register: imessage_verification
+      changed_when: false
+      failed_when: false
+
+    - name: Save the verification report
+      ansible.builtin.copy:
+        dest: "{{ imessage_export_path }}/verification.json"
+        mode: "0600"
+        content: "{{ imessage_verification.stdout }}\n"
+
+    - name: Require a valid export
+      ansible.builtin.assert:
+        that:
+          - imessage_verification.rc == 0
+        fail_msg: >-
+          Export verification failed. Review
+          {{ imessage_export_path }}/verification.json before using this backup.
+
+    - name: Report the completed backup
+      ansible.builtin.debug:
+        msg:
+          - "Backup complete: {{ imessage_export_path }}"
+          - "Exporter: {{ imessage_exporter_version.stdout | trim }}"
+          - "Verification: {{ imessage_verification.stdout | from_json }}"

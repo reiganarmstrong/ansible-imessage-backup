@@ -1,0 +1,102 @@
+---
+# Store private overrides in ../local.yml, which Git ignores.
+imessage_local_vars_path: "{{ playbook_dir }}/local.yml"
+imessage_backup_root: "{{ lookup('ansible.builtin.env', 'HOME') }}/Documents/Backups/iMessage"
+imessage_backup_prefix: "imessage-backup"
+imessage_export_run_id: ""
+
+# Leave blank to discover imessage-exporter from PATH. If set, use an absolute path.
+imessage_exporter_binary: ""
+imessage_export_format: "html"
+imessage_copy_method: "clone"
+imessage_additional_args: []
+imessage_create_heic_previews: true
+imessage_heic_preview_quality: "high"
+imessage_heic_preview_max_pixels: 4096
+imessage_heic_preview_workers: 8
+
+# Preserve a consistent chat.db snapshot and every locally readable attachment
+# row, including records intentionally omitted by imessage-exporter.
+imessage_preserve_source_data: true
+imessage_messages_database: "{{ lookup('ansible.builtin.env', 'HOME') }}/Library/Messages/chat.db"
+imessage_source_preservation_directory_name: "Source Preservation"
+imessage_patch_source_attachments_into_html: true
+
+# Optionally copy a directory of separately recovered files into each new export.
+# This preserves those files but cannot reconnect orphan records to conversation HTML.
+imessage_recovered_assets_source: ""
+imessage_recovered_assets_directory_name: "Recovered Attachments"
+imessage_recovery_manifest: ""
+# Optional row-level SHA-256 map for files recovered outside the live store.
+imessage_recovered_source_map: ""
+
+# Optionally recover missing files from an unencrypted Finder/iTunes device
+# backup. Exact same-message/name/size matches are always eligible. Device
+# variants are the same logical message asset with different bytes and require
+# an explicit opt-in.
+imessage_ios_backup_path: ""
+imessage_recover_ios_device_variants: false
+imessage_preserve_ios_hidden_counterparts: true
+imessage_allow_broken_references: false
+
+# Cross-archive lifecycle state and static indexes.
+imessage_lifecycle_state_directory_name: ".imessage-archive-state"
+imessage_lifecycle_archive_path: ""
+imessage_master_index_enabled: true
+imessage_master_index_name: "index.html"
+imessage_archive_catalog_name: "archive-catalog.json"
+imessage_message_index_name: "message-index.json"
+imessage_catalog_remote_hydration_enabled: true
+imessage_catalog_cache_directory_name: "catalog-cache"
+imessage_catalog_hydration_include_local_archives: false
+
+# Optional retirement of full local staging archives. This never changes the
+# Messages database or deletes remote archives.
+imessage_local_retirement_enabled: false
+imessage_local_retirement_keep_count: 0
+imessage_local_retirement_require_restore_attestation: true
+
+# Safe-pruning reports are advisory and never modify Messages. A value of one
+# implements single-copy history: once one remotely verified, attachment-
+# complete copy exists, the message can be reviewed for manual removal.
+imessage_pruning_report_enabled: true
+imessage_pruning_minimum_verified_copies: 1
+imessage_pruning_safety_hours: 24
+imessage_pruning_report_name: "pruning-report.json"
+imessage_pruning_html_report_name: "pruning-report.html"
+
+# Optionally remove an older remote archive only when verified compact catalogs
+# prove that every message GUID and every preserved attachment digest in it is
+# present in later verified archives. This is deliberately opt-in because it
+# permanently removes remote data.
+imessage_remote_superseded_retirement_enabled: false
+imessage_remote_superseded_retirement_report_name: "remote-superseded-retirement.json"
+
+# Optional append-only upload and byte-level verification through an rclone
+# remote configured for Nextcloud WebDAV.
+imessage_nextcloud_enabled: false
+imessage_nextcloud_rclone_binary: ""
+imessage_nextcloud_remote: ""
+imessage_nextcloud_transfers: 4
+imessage_nextcloud_checkers: 4
+
+# One-command post-authentication activation settings.
+imessage_activation_remote: "nextcloud:Backups/iMessage"
+imessage_activation_install_schedule: true
+
+# Manual, non-destructive restore-test settings.
+imessage_restore_archive_name: ""
+imessage_restore_root: "{{ lookup('ansible.builtin.env', 'HOME') }}/Documents/Backups/iMessage-Restore-Tests"
+imessage_restore_run_id: ""
+imessage_restore_keep_copy: true
+imessage_restore_verification_directory_name: "restore-verifications"
+imessage_restore_minimum_free_bytes_after: 21474836480
+imessage_restore_minimum_free_percent_after: 10
+
+# Optional weekly LaunchAgent settings used by install-schedule.yml.
+imessage_schedule_label: "io.github.ansible-imessage-backup"
+imessage_schedule_weekday: 1
+imessage_schedule_hour: 3
+imessage_schedule_minute: 0
+imessage_schedule_path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+imessage_schedule_log_retention_days: 90

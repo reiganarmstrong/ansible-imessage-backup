@@ -1,0 +1,96 @@
+---
+- name: Upload and byte-verify one immutable iMessage archive in Nextcloud
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Select the archive to publish
+      ansible.builtin.set_fact:
+        imessage_lifecycle_effective_archive_path: >-
+          {{
+            imessage_export_path
+            if imessage_export_path is defined
+            else imessage_lifecycle_archive_path
+          }}
+      when: imessage_nextcloud_enabled
+
+    - name: Validate Nextcloud archive settings
+      ansible.builtin.assert:
+        that:
+          - imessage_nextcloud_enabled is boolean
+          - not imessage_nextcloud_enabled or imessage_nextcloud_remote | length > 0
+          - not imessage_nextcloud_enabled or ':' in imessage_nextcloud_remote
+          - not imessage_nextcloud_enabled or imessage_lifecycle_effective_archive_path | length > 0
+          - imessage_nextcloud_transfers | int >= 1
+          - imessage_nextcloud_checkers | int >= 1
+        fail_msg: >-
+          Configure an rclone Nextcloud destination such as
+          nextcloud:Backups/iMessage and provide an archive path.
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - imessage_nextcloud_enabled
+        - imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_effective_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_rclone_lookup.stdout | default('') | trim
+          }}
+      when: imessage_nextcloud_enabled
+
+    - name: Require rclone
+      ansible.builtin.assert:
+        that:
+          - imessage_effective_rclone_binary | length > 0
+        fail_msg: >-
+          rclone was not found. Install it with `brew install rclone`, run
+          `rclone config`, and configure imessage_nextcloud_remote.
+      when: imessage_nextcloud_enabled
+
+    - name: Read the rclone version
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_effective_rclone_binary }}"
+          - version
+      register: imessage_rclone_version
+      changed_when: false
+      when: imessage_nextcloud_enabled
+
+    - name: Publish the selected archive
+      ansible.builtin.include_tasks: tasks/publish_archive.yml
+      vars:
+        imessage_archive_to_publish: "{{ imessage_lifecycle_effective_archive_path }}"
+      when: imessage_nextcloud_enabled
+
+    - name: Report disabled Nextcloud publication
+      ansible.builtin.debug:
+        msg: >-
+          Nextcloud publication is disabled. Set imessage_nextcloud_enabled
+          and imessage_nextcloud_remote in private local.yml to enable the
+          remote verification gate.
+      when: not imessage_nextcloud_enabled

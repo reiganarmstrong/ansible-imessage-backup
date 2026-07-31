@@ -1,0 +1,56 @@
+---
+# Stable orchestration entry point for the complete archive lifecycle.
+#
+# Keep each stage isolated so it remains independently runnable and can be
+# composed into other Ansible workflows.
+- name: Create a verified iMessage export
+  ansible.builtin.import_playbook: playbook.yml
+  tags:
+    - export
+
+- name: Publish and remotely verify the immutable archive
+  ansible.builtin.import_playbook: nextcloud-archive.yml
+  tags:
+    - nextcloud
+    - nextcloud_archive
+
+- name: Repair any older locally verified archive missing from this remote
+  ansible.builtin.import_playbook: nextcloud-backlog.yml
+  tags:
+    - nextcloud
+    - nextcloud_backlog
+
+- name: Hydrate compact catalog data for verified remote-only archives
+  ansible.builtin.import_playbook: catalog-hydrate.yml
+  tags:
+    - nextcloud
+    - catalog
+    - catalog_hydrate
+
+- name: Retire verified full local staging archives when explicitly enabled
+  ansible.builtin.import_playbook: retire-local-archives.yml
+  tags:
+    - retire
+    - local_retirement
+
+- name: Retire older remote archives only when all useful content exists later
+  ansible.builtin.import_playbook: retire-superseded-remote-archives.yml
+  tags:
+    - retire
+    - remote_superseded_retirement
+
+- name: Rebuild the cross-archive catalog
+  ansible.builtin.import_playbook: catalog.yml
+  tags:
+    - catalog
+
+- name: Build the safe-pruning eligibility report
+  ansible.builtin.import_playbook: pruning-report.yml
+  tags:
+    - pruning
+
+- name: Publish and remotely verify lifecycle metadata
+  ansible.builtin.import_playbook: nextcloud-metadata.yml
+  tags:
+    - nextcloud
+    - nextcloud_metadata

@@ -1,0 +1,116 @@
+#!/bin/zsh
+set -euo pipefail
+umask 077
+
+export HOME="{{ ansible_facts['env']['HOME'] }}"
+export PATH="{{ imessage_schedule_path }}"
+export ANSIBLE_CONFIG="{{ playbook_dir }}/ansible.cfg"
+
+readonly backup_state_dir="$HOME/Library/Application Support/ansible-imessage-backup"
+readonly backup_lock_dir="$HOME/Library/Caches/ansible-imessage-backup/run.lock"
+readonly backup_log_dir="$HOME/Library/Logs/ansible-imessage-backup"
+readonly backup_started_at="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+readonly backup_run_log="$backup_log_dir/run-$(/bin/date -u '+%Y%m%dT%H%M%SZ').log"
+
+/bin/mkdir -p "$backup_state_dir" "$backup_log_dir" \
+  "$HOME/Library/Caches/ansible-imessage-backup"
+/usr/bin/find "$backup_log_dir" -type f -name 'run-*.log' \
+  -mtime +{{ imessage_schedule_log_retention_days | int }} -delete
+
+write_status() {
+  local outcome="$1"
+  local exit_code="$2"
+  local status_name="$3"
+  local ended_at
+  local temporary_status
+  local exit_code_json
+  local ended_at_json
+  if [[ "$outcome" == "running" ]]; then
+    exit_code_json="null"
+    ended_at_json="null"
+  else
+    ended_at="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    exit_code_json="$exit_code"
+    ended_at_json="\"$ended_at\""
+  fi
+  temporary_status="$backup_state_dir/$status_name.$$"
+  {
+    /usr/bin/printf '{\n'
+    /usr/bin/printf '  "schema_version": 1,\n'
+    /usr/bin/printf '  "outcome": "%s",\n' "$outcome"
+    /usr/bin/printf '  "exit_code": %s,\n' "$exit_code_json"
+    /usr/bin/printf '  "pid": %d,\n' "$$"
+    /usr/bin/printf '  "started_at": "%s",\n' "$backup_started_at"
+    /usr/bin/printf '  "ended_at": %s,\n' "$ended_at_json"
+    /usr/bin/printf '  "log_path": "%s"\n' "$backup_run_log"
+    /usr/bin/printf '}\n'
+  } > "$temporary_status"
+  /bin/chmod 0600 "$temporary_status"
+  /bin/mv -f "$temporary_status" "$backup_state_dir/$status_name"
+  if [[ "$status_name" == "last-run.json" ]] \
+    && [[ "$outcome" == "succeeded" ]]; then
+    /bin/cp "$backup_state_dir/last-run.json" \
+      "$backup_state_dir/last-success.json"
+    /bin/chmod 0600 "$backup_state_dir/last-success.json"
+  fi
+}
+
+release_backup_lock() {
+  if [[ -f "$backup_lock_dir/pid" ]] \
+    && [[ "$(<"$backup_lock_dir/pid")" == "$$" ]]; then
+    /bin/rm -f "$backup_lock_dir/pid"
+    /bin/rmdir "$backup_lock_dir" 2>/dev/null || true
+  fi
+}
+
+if ! /bin/mkdir "$backup_lock_dir" 2>/dev/null; then
+  existing_pid=""
+  if [[ -f "$backup_lock_dir/pid" ]]; then
+    existing_pid="$(<"$backup_lock_dir/pid")"
+  fi
+  if [[ "$existing_pid" == <-> ]] \
+    && /bin/kill -0 "$existing_pid" 2>/dev/null; then
+    write_status "skipped_already_running" 0 "last-skipped.json"
+    exit 0
+  fi
+  /bin/rm -f "$backup_lock_dir/pid"
+  /bin/rmdir "$backup_lock_dir" 2>/dev/null || true
+  if ! /bin/mkdir "$backup_lock_dir" 2>/dev/null; then
+    write_status "failed_to_acquire_lock" 75 "last-skipped.json"
+    exit 75
+  fi
+fi
+/usr/bin/printf '%d\n' "$$" > "$backup_lock_dir/pid"
+/bin/chmod 0600 "$backup_lock_dir/pid"
+
+handle_backup_signal() {
+  local exit_code="$1"
+  write_status "interrupted" "$exit_code" "last-run.json"
+  exit "$exit_code"
+}
+
+trap release_backup_lock EXIT
+trap 'handle_backup_signal 129' HUP
+trap 'handle_backup_signal 130' INT
+trap 'handle_backup_signal 143' TERM
+write_status "running" "null" "last-run.json"
+
+exec >> "$backup_run_log" 2>&1
+/usr/bin/printf 'Started iMessage archive lifecycle at %s\n' "$backup_started_at"
+
+cd "{{ playbook_dir }}"
+set +e
+"{{ imessage_ansible_playbook_lookup.stdout | trim }}" \
+  --inventory "{{ playbook_dir }}/inventory.ini" \
+  "{{ playbook_dir }}/archive.yml"
+backup_exit_code=$?
+set -e
+
+if (( backup_exit_code == 0 )); then
+  write_status "succeeded" 0 "last-run.json"
+else
+  write_status "failed" "$backup_exit_code" "last-run.json"
+fi
+/usr/bin/printf 'Finished iMessage archive lifecycle with exit code %d\n' \
+  "$backup_exit_code"
+exit "$backup_exit_code"

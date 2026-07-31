@@ -1,0 +1,170 @@
+---
+- name: Hydrate compact catalog data for verified remote-only iMessage archives
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate catalog-hydration settings
+      ansible.builtin.assert:
+        that:
+          - imessage_catalog_remote_hydration_enabled is boolean
+          - imessage_catalog_cache_directory_name | length > 0
+          - >-
+            imessage_catalog_cache_directory_name
+            == (imessage_catalog_cache_directory_name | basename)
+          - >-
+            not (
+              imessage_catalog_remote_hydration_enabled
+              and imessage_nextcloud_enabled
+            )
+            or imessage_nextcloud_enabled
+          - >-
+            not (
+              imessage_catalog_remote_hydration_enabled
+              and imessage_nextcloud_enabled
+            )
+            or imessage_nextcloud_remote | length > 0
+          - >-
+            not (
+              imessage_catalog_remote_hydration_enabled
+              and imessage_nextcloud_enabled
+            )
+            or ':' in imessage_nextcloud_remote
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_catalog_hydration_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+        - imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_catalog_hydration_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else
+            imessage_catalog_hydration_rclone_lookup.stdout
+            | default("")
+            | trim
+          }}
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Require rclone
+      ansible.builtin.assert:
+        that:
+          - imessage_catalog_hydration_rclone_binary | length > 0
+        fail_msg: "rclone is required to hydrate remote catalog data."
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Select remote-only archives requiring catalog data
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              ansible_playbook_python,
+              playbook_dir ~ "/scripts/select_remote_catalog_archives.py",
+              imessage_backup_root,
+              "--backup-prefix",
+              imessage_backup_prefix,
+              "--state-directory-name",
+              imessage_lifecycle_state_directory_name,
+              "--cache-directory-name",
+              imessage_catalog_cache_directory_name,
+              "--remote-root",
+              imessage_nextcloud_remote
+            ]
+            + (
+              ["--include-local-archives"]
+              if (
+                imessage_catalog_hydration_include_local_archives
+                or imessage_local_retirement_enabled
+              )
+              else []
+            )
+          }}
+      register: imessage_catalog_hydration_selection
+      changed_when: false
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Create catalog-cache state directories
+      ansible.builtin.file:
+        path: >-
+          {{
+            imessage_backup_root
+            ~ "/"
+            ~ imessage_lifecycle_state_directory_name
+            ~ "/"
+            ~ item
+          }}
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ imessage_catalog_cache_directory_name }}"
+        - "catalog-cache-checks"
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Hydrate every missing compact catalog cache
+      ansible.builtin.include_tasks: tasks/hydrate_catalog_archive.yml
+      loop: >-
+        {{
+          (
+            imessage_catalog_hydration_selection.stdout | from_json
+          ).archive_names
+        }}
+      loop_control:
+        loop_var: imessage_catalog_archive_name
+        label: "{{ imessage_catalog_archive_name }}"
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Report catalog hydration
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (
+              imessage_catalog_hydration_selection.stdout | from_json
+            ).count
+          }} verified remote-only archive catalog cache(s) hydrated.
+      when:
+        - imessage_catalog_remote_hydration_enabled
+        - imessage_nextcloud_enabled
+
+    - name: Report disabled catalog hydration
+      ansible.builtin.debug:
+        msg: "Remote catalog hydration is disabled."
+      when: >-
+        not (
+          imessage_catalog_remote_hydration_enabled
+          and imessage_nextcloud_enabled
+        )

@@ -1,0 +1,150 @@
+---
+- name: Validate and persist private Nextcloud activation settings
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate activation settings
+      ansible.builtin.assert:
+        that:
+          - imessage_activation_remote | length > 0
+          - "':' in imessage_activation_remote"
+          - imessage_activation_install_schedule is boolean
+          - imessage_backup_root | length > 0
+          - imessage_backup_prefix | length > 0
+        fail_msg: >-
+          Configure imessage_activation_remote as an rclone destination such
+          as nextcloud:Backups/iMessage.
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/which
+          - rclone
+      register: imessage_activation_rclone_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Select the activation rclone binary
+      ansible.builtin.set_fact:
+        imessage_activation_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_activation_rclone_lookup.stdout | trim
+          }}
+        imessage_activation_remote_name: >-
+          {{ imessage_activation_remote.split(":", 1)[0] ~ ":" }}
+
+    - name: Require rclone
+      ansible.builtin.assert:
+        that:
+          - imessage_activation_rclone_binary | length > 0
+        fail_msg: "Install rclone before activating Nextcloud publication."
+
+    - name: List configured rclone remotes
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_activation_rclone_binary }}"
+          - listremotes
+      register: imessage_activation_rclone_remotes
+      changed_when: false
+
+    - name: Require the configured Nextcloud remote
+      ansible.builtin.assert:
+        that:
+          - >-
+            imessage_activation_remote_name
+            in imessage_activation_rclone_remotes.stdout_lines
+        fail_msg: >-
+          {{ imessage_activation_remote_name }} is not configured. Run
+          `rclone config` and create a Nextcloud WebDAV remote first.
+
+    - name: Verify Nextcloud authentication
+      ansible.builtin.command:
+        argv:
+          - "{{ imessage_activation_rclone_binary }}"
+          - lsd
+          - "{{ imessage_activation_remote_name }}"
+      changed_when: false
+
+    - name: Select the newest locally verified archive
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/select_latest_verified_archive.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+      register: imessage_activation_archive_selection
+      changed_when: false
+
+    - name: Create the private-variable parent directory
+      ansible.builtin.file:
+        path: "{{ imessage_local_vars_path | dirname }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create an absent private-variable file
+      ansible.builtin.copy:
+        dest: "{{ imessage_local_vars_path }}"
+        content: "---\n"
+        force: false
+        mode: "0600"
+
+    - name: Persist non-secret Nextcloud activation settings
+      ansible.builtin.lineinfile:
+        path: "{{ imessage_local_vars_path }}"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        insertafter: EOF
+        mode: "0600"
+      loop:
+        - regexp: "^imessage_nextcloud_enabled:"
+          line: "imessage_nextcloud_enabled: true"
+        - regexp: "^imessage_nextcloud_remote:"
+          line: >-
+            imessage_nextcloud_remote:
+            {{ imessage_activation_remote | to_json }}
+        - regexp: "^imessage_nextcloud_rclone_binary:"
+          line: >-
+            imessage_nextcloud_rclone_binary:
+            {{ imessage_activation_rclone_binary | to_json }}
+      loop_control:
+        label: "{{ item.regexp }}"
+      no_log: true
+
+    - name: Activate verified Nextcloud publication for this run
+      ansible.builtin.set_fact:
+        imessage_nextcloud_enabled: true
+        imessage_nextcloud_remote: "{{ imessage_activation_remote }}"
+        imessage_nextcloud_rclone_binary: >-
+          {{ imessage_activation_rclone_binary }}
+        imessage_lifecycle_archive_path: >-
+          {{
+            (
+              imessage_activation_archive_selection.stdout | from_json
+            ).archive_path
+          }}
+
+    - name: Report the selected activation archive
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Selected archive:
+            {{ imessage_lifecycle_archive_path | basename }}
+          - "Remote destination: {{ imessage_nextcloud_remote }}"

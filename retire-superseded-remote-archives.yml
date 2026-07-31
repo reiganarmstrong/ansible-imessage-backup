@@ -1,0 +1,121 @@
+---
+- name: Retire semantically superseded remote iMessage archives
+  hosts: local
+  gather_facts: false
+
+  vars_files:
+    - vars/defaults.yml
+
+  pre_tasks:
+    - name: Check for private local overrides
+      ansible.builtin.stat:
+        path: "{{ imessage_local_vars_path }}"
+      register: imessage_local_vars
+
+    - name: Load private local overrides
+      ansible.builtin.include_vars:
+        file: "{{ imessage_local_vars_path }}"
+      when: imessage_local_vars.stat.exists
+
+    - name: Validate remote superseded-retirement settings
+      ansible.builtin.assert:
+        that:
+          - imessage_remote_superseded_retirement_enabled is boolean
+          - imessage_remote_superseded_retirement_report_name | length > 0
+          - >-
+            imessage_remote_superseded_retirement_report_name
+            == (imessage_remote_superseded_retirement_report_name | basename)
+          - >-
+            not imessage_remote_superseded_retirement_enabled
+            or imessage_nextcloud_enabled
+          - >-
+            not imessage_remote_superseded_retirement_enabled
+            or ':' in imessage_nextcloud_remote
+
+  tasks:
+    - name: Locate rclone
+      ansible.builtin.command:
+        argv: [/usr/bin/which, rclone]
+      register: imessage_remote_retirement_rclone_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - imessage_remote_superseded_retirement_enabled
+        - imessage_nextcloud_rclone_binary | length == 0
+
+    - name: Select the rclone binary
+      ansible.builtin.set_fact:
+        imessage_remote_retirement_rclone_binary: >-
+          {{
+            imessage_nextcloud_rclone_binary
+            if imessage_nextcloud_rclone_binary | length > 0
+            else imessage_remote_retirement_rclone_lookup.stdout
+            | default('') | trim
+          }}
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Require rclone for remote retirement
+      ansible.builtin.assert:
+        that:
+          - imessage_remote_retirement_rclone_binary | length > 0
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Select fully superseded verified remote archives
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/scripts/select_superseded_remote_archives.py"
+          - "{{ imessage_backup_root }}"
+          - --backup-prefix
+          - "{{ imessage_backup_prefix }}"
+          - --state-directory-name
+          - "{{ imessage_lifecycle_state_directory_name }}"
+          - --cache-directory-name
+          - "{{ imessage_catalog_cache_directory_name }}"
+          - --remote-root
+          - "{{ imessage_nextcloud_remote }}"
+      register: imessage_remote_retirement_selection
+      changed_when: false
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Retire every fully superseded remote archive
+      ansible.builtin.include_tasks: tasks/retire_superseded_remote_archive.yml
+      loop: >-
+        {{
+          (imessage_remote_retirement_selection.stdout | from_json).archive_names
+        }}
+      loop_control:
+        loop_var: imessage_superseded_archive_name
+        label: "{{ imessage_superseded_archive_name }}"
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Save the remote superseded-retirement report
+      ansible.builtin.copy:
+        dest: >-
+          {{
+            imessage_backup_root ~ "/" ~ imessage_lifecycle_state_directory_name
+            ~ "/" ~ imessage_remote_superseded_retirement_report_name
+          }}
+        mode: "0600"
+        content: >-
+          {% set selection = imessage_remote_retirement_selection.stdout | from_json %}
+          {{
+            selection | combine({
+              "automatic_deletion_performed": selection.candidate_count | int > 0,
+              "retired_at": now(utc=true, fmt="%Y-%m-%dT%H:%M:%SZ")
+            }) | to_nice_json
+          }}
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Report remote superseded retirement
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (imessage_remote_retirement_selection.stdout | from_json).candidate_count
+          }} fully superseded remote archive(s) retired.
+      when: imessage_remote_superseded_retirement_enabled
+
+    - name: Report disabled remote superseded retirement
+      ansible.builtin.debug:
+        msg: "Remote superseded-archive retirement is disabled."
+      when: not imessage_remote_superseded_retirement_enabled

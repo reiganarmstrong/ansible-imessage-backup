@@ -1,0 +1,144 @@
+---
+- name: Define paths for the remote-only catalog archive
+  ansible.builtin.set_fact:
+    imessage_catalog_hydration_remote_path: >-
+      {{
+        imessage_nextcloud_remote | regex_replace('/+$', '')
+        ~ "/"
+        ~ imessage_catalog_archive_name
+      }}
+    imessage_catalog_hydration_cache_path: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/"
+        ~ imessage_catalog_cache_directory_name
+        ~ "/"
+        ~ imessage_catalog_archive_name
+      }}
+    imessage_catalog_hydration_check_report: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/catalog-cache-checks/"
+        ~ imessage_catalog_archive_name
+        ~ ".txt"
+      }}
+
+- name: Remove an incomplete or stale catalog cache
+  ansible.builtin.file:
+    path: "{{ imessage_catalog_hydration_cache_path }}"
+    state: absent
+
+- name: Create the private catalog cache directory
+  ansible.builtin.file:
+    path: "{{ imessage_catalog_hydration_cache_path }}"
+    state: directory
+    mode: "0700"
+
+- name: Download only catalog-critical data from the remote archive
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_catalog_hydration_rclone_binary }}"
+      - copy
+      - "{{ imessage_catalog_hydration_remote_path }}"
+      - "{{ imessage_catalog_hydration_cache_path }}"
+      - --include
+      - "/*.html"
+      - --include
+      - "/verification.json"
+      - --include
+      - "/Source Preservation/chat.db"
+      - --include
+      - "/Source Preservation/attachment-manifest.json"
+      - --create-empty-src-dirs
+      - --transfers
+      - "{{ imessage_nextcloud_transfers | string }}"
+      - --checkers
+      - "{{ imessage_nextcloud_checkers | string }}"
+  changed_when: true
+
+- name: Byte-verify the compact catalog cache
+  ansible.builtin.command:
+    argv:
+      - "{{ imessage_catalog_hydration_rclone_binary }}"
+      - check
+      - "{{ imessage_catalog_hydration_cache_path }}"
+      - "{{ imessage_catalog_hydration_remote_path }}"
+      - --download
+      - --include
+      - "/*.html"
+      - --include
+      - "/verification.json"
+      - --include
+      - "/Source Preservation/chat.db"
+      - --include
+      - "/Source Preservation/attachment-manifest.json"
+      - --combined
+      - "{{ imessage_catalog_hydration_check_report }}"
+      - --checkers
+      - "{{ imessage_nextcloud_checkers | string }}"
+  changed_when: false
+
+- name: Protect the catalog-cache byte-comparison report
+  ansible.builtin.file:
+    path: "{{ imessage_catalog_hydration_check_report }}"
+    mode: "0600"
+
+- name: Structurally validate the compact catalog cache
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ playbook_dir }}/scripts/validate_catalog_cache.py"
+      - "{{ imessage_catalog_hydration_cache_path }}"
+  register: imessage_catalog_hydration_validation
+  changed_when: false
+
+- name: Read the source remote-verification marker
+  ansible.builtin.slurp:
+    src: >-
+      {{
+        imessage_backup_root
+        ~ "/"
+        ~ imessage_lifecycle_state_directory_name
+        ~ "/remote-verifications/"
+        ~ imessage_catalog_archive_name
+        ~ ".json"
+      }}
+  register: imessage_catalog_hydration_remote_marker
+
+- name: Record the successful compact-cache verification
+  ansible.builtin.copy:
+    dest: >-
+      {{
+        imessage_catalog_hydration_cache_path
+        ~ "/.catalog-cache-verification.json"
+      }}
+    mode: "0600"
+    content: >-
+      {% set remote_marker =
+        imessage_catalog_hydration_remote_marker.content
+        | b64decode
+        | from_json
+      %}
+      {{
+        {
+          "schema_version": 1,
+          "passed": true,
+          "archive_name": imessage_catalog_archive_name,
+          "remote_destination": remote_marker.remote_destination,
+          "remote_verified_at": remote_marker.verified_at,
+          "remote_file_count": remote_marker.file_count,
+          "remote_total_bytes": remote_marker.total_bytes,
+          "hydrated_at": now(
+            utc=true,
+            fmt="%Y-%m-%dT%H:%M:%SZ"
+          ),
+          "verification_mode": "filtered_rclone_check_download",
+          "structural_validation": (
+            imessage_catalog_hydration_validation.stdout | from_json
+          )
+        } | to_nice_json
+      }}
