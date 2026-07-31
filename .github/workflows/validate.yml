@@ -31,6 +31,7 @@ jobs:
           ansible-playbook --syntax-check playbook.yml
           ansible-playbook --syntax-check catalog-hydrate.yml
           ansible-playbook --syntax-check retire-local-archives.yml
+          ansible-playbook --syntax-check retire-superseded-remote-archives.yml
           ansible-playbook --syntax-check catalog.yml
           ansible-playbook --syntax-check pruning-report.yml
           ansible-playbook --syntax-check nextcloud-archive.yml
