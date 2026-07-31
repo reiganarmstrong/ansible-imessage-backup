@@ -95,8 +95,13 @@ imessage_restore_minimum_free_percent_after: 10
 
 # Optional weekly LaunchAgent settings used by install-schedule.yml.
 imessage_schedule_label: "io.github.ansible-imessage-backup"
-imessage_schedule_weekday: 1
+# launchd uses 0 or 7 for Sunday, 1 for Monday, and 6 for Saturday.
+imessage_schedule_weekday: 7
 imessage_schedule_hour: 3
 imessage_schedule_minute: 0
+imessage_schedule_catch_up_at_load: true
+# A login/boot invocation runs only when the last success is this old. Six days
+# lets a Monday catch-up coexist with the following Sunday calendar run.
+imessage_schedule_minimum_interval_hours: 144
 imessage_schedule_path: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 imessage_schedule_log_retention_days: 90

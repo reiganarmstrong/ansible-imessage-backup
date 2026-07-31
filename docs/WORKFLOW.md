@@ -337,12 +337,18 @@ Install the per-user LaunchAgent after private settings are correct:
 ansible-playbook install-schedule.yml
 ```
 
-The generated wrapper calls `archive.yml`. Run it interactively once from the
+The generated wrapper calls `archive.yml`. Force it interactively from the
 same executable context to confirm Full Disk Access and rclone authentication:
 
 ```sh
-~/.local/bin/ansible-imessage-backup
+~/.local/bin/ansible-imessage-backup --force
 ```
+
+The default calendar is Sunday at 03:00 (`Weekday=7`). A sleeping Mac receives
+the calendar event after wake. `RunAtLoad` covers login after a powered-off
+interval, while a 144-hour minimum-success interval prevents every login from
+creating a backup. `--force` bypasses only that age check; it does not bypass
+the single-instance lock or any archive verification gate.
 
 The wrapper acquires an atomic per-user lock before launching Ansible. A
 second manual or scheduled invocation records `skipped_already_running` and

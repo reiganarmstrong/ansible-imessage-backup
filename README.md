@@ -528,13 +528,17 @@ ansible-playbook install-schedule.yml
 Change the schedule in `local.yml` before installing it:
 
 ```yaml
-imessage_schedule_weekday: 1
+imessage_schedule_weekday: 7
 imessage_schedule_hour: 3
 imessage_schedule_minute: 0
+imessage_schedule_catch_up_at_load: true
+imessage_schedule_minimum_interval_hours: 144
 ```
 
-Launchd weekday values run from `1` (Sunday) through `7` (Saturday). Logs are
-written to:
+Launchd uses `0` or `7` for Sunday, `1` for Monday, and `6` for Saturday. If
+the Mac is asleep at the calendar time, launchd runs the job after wake. If it
+was powered off, `RunAtLoad` invokes the wrapper at login; the wrapper proceeds
+only when the last success is at least 144 hours old. Logs are written to:
 
 ```text
 ~/Library/Logs/ansible-imessage-backup/
@@ -560,11 +564,16 @@ Inspect the complete local operational state at any time:
 make status
 ```
 
-Run the generated wrapper interactively once to confirm Full Disk Access:
+Force a manual backup regardless of the minimum interval:
 
 ```sh
-~/.local/bin/ansible-imessage-backup
+~/.local/bin/ansible-imessage-backup --force
 ```
+
+The command prints the exact per-run log path and stays attached until the
+backup finishes. A zero exit status means the complete lifecycle succeeded.
+Without `--force`, the wrapper applies the same age guard used for login/boot
+catch-up and may record `skipped_not_due` without creating an export.
 
 Remove the schedule without deleting any backups or logs:
 

@@ -51,10 +51,14 @@ imessage_heic_preview_workers: 8
 # Set true only when diagnostics document known, unrecoverable source attachments.
 imessage_allow_broken_references: false
 
-# Sunday at 03:00. launchd uses 1 for Sunday and 7 for Saturday.
-imessage_schedule_weekday: 1
+# Sunday at 03:00. launchd uses 0 or 7 for Sunday, 1 for Monday, and 6
+# for Saturday. RunAtLoad provides powered-off catch-up, while the interval
+# guard prevents a backup on every login.
+imessage_schedule_weekday: 7
 imessage_schedule_hour: 3
 imessage_schedule_minute: 0
+imessage_schedule_catch_up_at_load: true
+imessage_schedule_minimum_interval_hours: 144
 imessage_schedule_log_retention_days: 90
 
 # Restore tests default to leaving at least 20 GiB and 10% of the destination

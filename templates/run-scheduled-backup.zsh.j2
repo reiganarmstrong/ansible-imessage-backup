@@ -11,11 +11,27 @@ readonly backup_lock_dir="$HOME/Library/Caches/ansible-imessage-backup/run.lock"
 readonly backup_log_dir="$HOME/Library/Logs/ansible-imessage-backup"
 readonly backup_started_at="$(/bin/date -u '+%Y-%m-%dT%H:%M:%SZ')"
 readonly backup_run_log="$backup_log_dir/run-$(/bin/date -u '+%Y%m%dT%H%M%SZ').log"
+readonly backup_minimum_interval_seconds="{{ (imessage_schedule_minimum_interval_hours | int) * 3600 }}"
+
+force_backup=false
+case "${1:-}" in
+  "") ;;
+  --force) force_backup=true ;;
+  *)
+    /usr/bin/printf 'Usage: %s [--force]\n' "$0" >&2
+    exit 64
+    ;;
+esac
+if (( $# > 1 )); then
+  /usr/bin/printf 'Usage: %s [--force]\n' "$0" >&2
+  exit 64
+fi
 
 /bin/mkdir -p "$backup_state_dir" "$backup_log_dir" \
   "$HOME/Library/Caches/ansible-imessage-backup"
 /usr/bin/find "$backup_log_dir" -type f -name 'run-*.log' \
-  -mtime +{{ imessage_schedule_log_retention_days | int }} -delete
+  -mtime +{{ imessage_schedule_log_retention_days | int }} \
+  -exec /bin/rm -f '{}' +
 
 write_status() {
   local outcome="$1"
@@ -93,8 +109,24 @@ trap release_backup_lock EXIT
 trap 'handle_backup_signal 129' HUP
 trap 'handle_backup_signal 130' INT
 trap 'handle_backup_signal 143' TERM
+
+if [[ "$force_backup" != true ]] \
+  && [[ -f "$backup_state_dir/last-success.json" ]]; then
+  last_success_epoch="$(
+    /usr/bin/stat -f '%m' "$backup_state_dir/last-success.json" 2>/dev/null \
+      || /usr/bin/printf '0'
+  )"
+  current_epoch="$(/bin/date '+%s')"
+  if [[ "$last_success_epoch" == <-> ]] \
+    && (( current_epoch - last_success_epoch < backup_minimum_interval_seconds )); then
+    write_status "skipped_not_due" 0 "last-skipped.json"
+    exit 0
+  fi
+fi
+
 write_status "running" "null" "last-run.json"
 
+/usr/bin/printf 'iMessage backup log: %s\n' "$backup_run_log"
 exec >> "$backup_run_log" 2>&1
 /usr/bin/printf 'Started iMessage archive lifecycle at %s\n' "$backup_started_at"
 

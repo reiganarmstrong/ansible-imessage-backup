@@ -326,6 +326,13 @@
             {{ imessage_pruning_minimum_verified_copies }}
           remote_superseded_retirement_enabled: >-
             {{ imessage_remote_superseded_retirement_enabled }}
+          schedule_weekday: "{{ imessage_schedule_weekday }}"
+          schedule_hour: "{{ imessage_schedule_hour }}"
+          schedule_minute: "{{ imessage_schedule_minute }}"
+          schedule_catch_up_at_load: >-
+            {{ imessage_schedule_catch_up_at_load }}
+          schedule_minimum_interval_hours: >-
+            {{ imessage_schedule_minimum_interval_hours }}
           pending_remote_archive_count: >-
             {{
               (

@@ -47,12 +47,14 @@
     - name: Validate schedule settings
       ansible.builtin.assert:
         that:
-          - imessage_schedule_weekday | int >= 1
+          - imessage_schedule_weekday | int >= 0
           - imessage_schedule_weekday | int <= 7
           - imessage_schedule_hour | int >= 0
           - imessage_schedule_hour | int <= 23
           - imessage_schedule_minute | int >= 0
           - imessage_schedule_minute | int <= 59
+          - imessage_schedule_catch_up_at_load is boolean
+          - imessage_schedule_minimum_interval_hours | int >= 1
           - imessage_schedule_log_retention_days | int >= 1
 
     - name: Locate ansible-playbook
@@ -131,4 +133,6 @@
           Scheduled {{ imessage_schedule_label }} for weekday
           {{ imessage_schedule_weekday }} at
           {{ "%02d" | format(imessage_schedule_hour | int) }}:{{
-          "%02d" | format(imessage_schedule_minute | int) }}.
+          "%02d" | format(imessage_schedule_minute | int) }}; catch-up at
+          login/boot is {{ imessage_schedule_catch_up_at_load }} with a
+          {{ imessage_schedule_minimum_interval_hours }}-hour minimum interval.

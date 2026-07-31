@@ -10,7 +10,11 @@
     <string>{{ ansible_facts["env"]["HOME"] }}/.local/bin/ansible-imessage-backup</string>
   </array>
   <key>RunAtLoad</key>
+{% if imessage_schedule_catch_up_at_load %}
+  <true/>
+{% else %}
   <false/>
+{% endif %}
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
